@@ -1,0 +1,3 @@
+# Thugbot: engine values found at run time (delete a line to find it again)
+health 0x200 32
+pitch2 0x590 -1 0 1 1
