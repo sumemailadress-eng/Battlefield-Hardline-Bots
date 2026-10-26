@@ -1705,7 +1705,7 @@ static int brain_input(void *pp, float *fwd, float *strafe, float *turn, int *ac
 {
     void *player = FIELD(pp, OFF_PP_PLAYER, void *);
     for (int i = 0; i < MAX_BOTS; i++)
-        if (g_bot[i].player == player) { *fwd = g_bot[i].fwd; *strafe = g_bot[i].strafe; *turn = g_bot[i].turn; *action = g_bot[i].action; return g_bot[i].inVehicle ? 2 : 1; }
+        if (g_bot[i].player == player) { *fwd = g_bot[i].fwd; *strafe = g_bot[i].strafe; *turn = g_bot[i].turn; *action = g_bot[i].action; if (g_jumpUsed[i] == 2 && *action == 2 && now_ms() < g_mx[i].vaultUntil) *action = 0; return g_bot[i].inVehicle ? 2 : 1; }
     return 0;
 }
 
@@ -1747,6 +1747,6 @@ static int brain_buttons(void *pp, unsigned *buttons, float *pitch, float *roll,
 {
     void *player = FIELD(pp, OFF_PP_PLAYER, void *);
     for (int i = 0; i < MAX_BOTS; i++)
-        if (g_bot[i].player == player) { *buttons = g_bot[i].buttons; *pitch = g_bot[i].pitch; *roll = g_bot[i].roll; *yaw = g_bot[i].yawIn; *thr = g_bot[i].throttleIn; return 1; }
+        if (g_bot[i].player == player) { *buttons = g_bot[i].buttons; if (g_jumpUsed[i] == 1 && now_ms() < g_mx[i].vaultUntil) *buttons &= ~BTN_JUMP; *pitch = g_bot[i].pitch; *roll = g_bot[i].roll; *yaw = g_bot[i].yawIn; *thr = g_bot[i].throttleIn; return 1; }
     return 0;
 }

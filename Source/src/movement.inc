@@ -18,6 +18,12 @@ static float g_vaultMaxH = 1.05f;   // low_obstacle: tallest top it takes (swimm
 static MoveX g_mx[MAX_BOTS];
 static unsigned g_vaultCount, g_sprintFrames, g_vaultOk, g_vaultFail, g_vaultLogged, g_tpOk, g_tpFail;
 static float g_lastLand[3];   // low_obstacle: where it would land on the far side
+// Which jump input a vault sends (the tester's clip, 2026-10-26: "their model appears on top but they get put back"): 0 both
+// the pseudo-player jump action and the EIAJump button, 1 the action only, 2 the button only, 3 alternating per vault -
+// "jumpmode N"; "vaults" logs the over / came-back counts per input so the one the server keeps can be picked.
+static int g_jumpMode = 1, g_jumpUsed[MAX_BOTS];   // (5 min on mp_hills, alternating: both 13% came back, action only 10%,
+                                                  // button only 16% - the input is not the main cause; action only kept)
+static unsigned g_jmStat[3][2];
 static int g_vaultTeleport = 0;   // "vaulttp 0/1": a vault that didn't get over puts the bot where it would have landed (the tester) - off: writing +0x640 / +0x7d0 was undone by the game 8 of 8 times
 // Vaults that didn't get over (Chinatown 2026-10-23: three bots jumped at the same 0.9 m barrier by their spawn for 25 s).
 // Two failures at a spot (1.5 m, same way) and it isn't tried again for 3 minutes; the grid link that way is blocked so
@@ -29,7 +35,10 @@ static int g_badVaultNext;
 // write it off for 5 minutes: on The Block the criminals' fence at x -88 by their spawn went "can't be vaulted" after a
 // single fumble, routes that still crossed it had bots walk into it without jumping, and they barely reached a flag
 // (the tester 2026-10-25). Never where a player has been seen vaulting: it can be done.
-#define BAD_VAULT_FAILS 2   // (3 left bots trying a no-vault rail over and over: the tester, "they get placed back")
+// (2 until 2026-10-26: the tester, "force vaulting until it works" - a wall written off after 2 bounce-backs left bots stuck
+// behind it with no other way. Now 6 tries, each different - jump distance 0.85 / 0.6 / 1.1 / 0.45 m from the face, with
+// a run-up from under 2.5 m/s - and a write-off lasts 2 minutes.)
+#define BAD_VAULT_FAILS 6
 static int human_vaulted_near(const float *p)
 {
     if (!g_learn) return 0;
@@ -56,11 +65,18 @@ static void note_bad_vault(const float *p, float dx, float dz)
                 H->log("move: the obstacle at %.0f %.0f %.0f can't be vaulted (%d failures) - routes go round it", p[0], p[1], p[2], BAD_VAULT_FAILS);
                 bot_block_towards(p[0], p[1], p[2], p[0] + dx * 4, p[2] + dz * 4);
             }
-            g_badVault[k].until = t + 600000;
+            g_badVault[k].until = t + 120000;
             return;
         }
     int k = g_badVaultNext++ % MAX_BAD_VAULTS;
-    memcpy(g_badVault[k].p, p, 12); g_badVault[k].h[0] = dx; g_badVault[k].h[1] = dz; g_badVault[k].fails = 1; g_badVault[k].until = t + 600000;
+    memcpy(g_badVault[k].p, p, 12); g_badVault[k].h[0] = dx; g_badVault[k].h[1] = dz; g_badVault[k].fails = 1; g_badVault[k].until = t + 120000;
+}
+static int vault_fails(const float *p, float dx, float dz)   // failures so far at this spot, this way
+{
+    ULONGLONG t = now_ms();
+    for (int k = 0; k < MAX_BAD_VAULTS; k++)
+        if (g_badVault[k].until > t && dist2d(g_badVault[k].p, p) < 1.5f && g_badVault[k].h[0] * dx + g_badVault[k].h[1] * dz > 0.5f) return g_badVault[k].fails;
+    return 0;
 }
 
 static unsigned g_vaultBlind, g_vaultWait, g_swimLooks, g_swimVaults;
@@ -147,7 +163,8 @@ static int movement_tick(int i, Bot *b, void *soldier, const float *aim)
         // At The Block's playground 528 spots were written off that way in 20 min, routes went round them and the
         // crowd got worse.)
         if (!ok && (m->blind || player_ahead(p, m->vaultDir[0], m->vaultDir[1], 1.6f))) { g_vaultFail++; g_vaultBlind++; }
-        else if (ok) g_vaultOk++; else { g_vaultFail++; if (!tp) { note_bad_vault(m->vaultFrom, m->vaultDir[0], m->vaultDir[1]); if (bad_vault(m->vaultFrom, m->vaultDir[0], m->vaultDir[1])) b->npts = 0; } }
+        if (!m->blind) g_jmStat[g_jumpUsed[i]][ok ? 0 : 1]++;
+        if (ok) g_vaultOk++; else if (!(!ok && (m->blind || player_ahead(p, m->vaultDir[0], m->vaultDir[1], 1.6f)))) { g_vaultFail++; if (!tp) { note_bad_vault(m->vaultFrom, m->vaultDir[0], m->vaultDir[1]); if (bad_vault(m->vaultFrom, m->vaultDir[0], m->vaultDir[1])) b->npts = 0; } }
         if (!m->blind) { int c = ok ? 0 : rose > 0.3f ? 1 : 2; g_vStat[c][0] += m->jumpSpeed; g_vStat[c][1] += m->jumpDist; g_vStat[c][2] += m->jumpTop; g_vStat[c][3] += 1; }
         if (g_vaultLogged++ < 25) H->log("move: %s vault %s - rose %.2f m, moved %.1f m, from %.0f %.0f %.0f (jumped %.2f m from a %.2f m top at %.1f m/s)%s%s%s", (char *)b->player + OFF_PLAYER_NAME, ok ? "worked" : "FAILED", rose, went,
                                         m->vaultFrom[0], m->vaultFrom[1], m->vaultFrom[2], m->jumpDist, m->jumpTop, m->jumpSpeed, g_nav && nav_is_water(g_nav, m->vaultFrom[0], m->vaultFrom[1], m->vaultFrom[2]) ? " (in water)" : "", m->hadZoom ? " (sights were up)" : "",
@@ -200,7 +217,7 @@ static int movement_tick(int i, Bot *b, void *soldier, const float *aim)
             // (these three used to sit inside the comment above: a learned-spot vault was judged on the last vault's
             // height and direction, failed, and wrote the spot off)
             m->vaultTop = p[1]; m->vaultDir[0] = dx / dl; m->vaultDir[1] = dz / dl; m->blind = 0; m->jumpTop = 0; m->waterJump = 0;
-            m->vaults++; g_vaultCount++;
+            g_jumpUsed[i] = g_jumpMode == 3 ? (int)(m->vaults % 3) : g_jumpMode; m->vaults++; g_vaultCount++;
             return 1;
         }
     }
@@ -221,11 +238,29 @@ static int movement_tick(int i, Bot *b, void *soldier, const float *aim)
         if (lowAhead) {
             // Seen 1.3 m out: keep running at it and jump when the face is under 0.85 m away. Jumping at 1.3 m landed
             // the bot short, against the obstacle, and the game snapped it back. Someone in the way: wait for them.
-            if (player_ahead(p, dx, dz, 1.6f)) { m->nextLook = t + 250; g_vaultWait++; return 0; }
+            // Someone in the way - in front of it, or standing where it would land (a vault onto a spot someone is
+            // standing on is the one the server puts back: 120 of 155 failed vaults on mp_hills had a player there,
+            // and the tester's clip of D shows a crowd at the ledge): step sideways along the wall to a free stretch instead of
+            // queueing behind them (side by seed, flips after 1.5 s).
+            {
+                int busy = player_ahead(p, dx, dz, 1.6f);
+                for (int j = 0; j < g_playerCount && !busy && (g_lastLand[0] || g_lastLand[2]); j++) {
+                    void *s2 = bot_soldier(g_players[j]);
+                    if (s2 && s2 != soldier && dist2d(soldier_pos(s2), g_lastLand) < 1.3f && fabsf(soldier_pos(s2)[1] - g_lastLand[1]) < 1.5f) busy = 1;
+                }
+                if (busy) {
+                    int side = ((b->seed + (unsigned)(t / 1500)) & 1) ? 1 : -1;
+                    b->strafe = g_strafeSign * side; b->fwd = 0.2f; b->buttons &= ~BTN_SPRINT;
+                    m->nextLook = t + 120; g_vaultWait++;
+                    return 0;
+                }
+            }
             // In water (the tester, mp_hills pool: "they cannot vault over the ledges... vaulting works for me 10 times out of
             // 10"): wading is slow, a jump 0.85 m out falls short. Walk right up to the ledge (0.45 m), then jump, held
             // longer; no run-up (backing off in water only loses the little speed there is).
-            if (g_lastHitDist > (swimming ? 0.45f : 0.85f)) {
+            static const float kJumpAt[4] = { 0.85f, 0.6f, 1.1f, 0.45f };
+            int tries = vault_fails(p, dx, dz);
+            if (g_lastHitDist > (swimming ? 0.45f : kJumpAt[tries & 3])) {
                 m->nextLook = t + 40;
                 b->buttons |= BTN_SPRINT; b->buttons &= ~(BTN_ZOOM | BTN_CROUCH); b->fwd = 1; b->strafe = 0;
                 return 0;
@@ -236,7 +271,7 @@ static int movement_tick(int i, Bot *b, void *soldier, const float *aim)
                 const float *v = (const float *)((char *)soldier + OFF_SOLDIER_VELOCITY);
                 float sp = v[0] * dx + v[2] * dz;
                 if (dist2d(m->runupAt, p) > 3) m->runups = 0;
-                if (sp < 1.2f && m->runups < 1 && !swimming) {   // (only from a near standstill: run-ups at 2.4 - 2.8 m/s did not change the come-back rate, 17 - 23%, and cost a second each)
+                if (sp < (tries ? 2.5f : 1.2f) && m->runups < 1 && !swimming) {   // (only from a near standstill: run-ups at 2.4 - 2.8 m/s did not change the come-back rate, 17 - 23%, and cost a second each)
                     m->runups++; memcpy(m->runupAt, p, 12); g_runups++;
                     m->runupUntil = t + 900; m->nextLook = m->runupUntil + 40;
                     b->fwd = -1; b->strafe = 0; b->turn = 0; b->buttons &= ~(BTN_SPRINT | BTN_ZOOM | BTN_CROUCH | BTN_FIRE);
@@ -264,7 +299,7 @@ static int movement_tick(int i, Bot *b, void *soldier, const float *aim)
             { int zoomed = (b->buttons & BTN_ZOOM) != 0; m->hadZoom = zoomed; m->jumpFrom = t + (zoomed ? 220 : 0); if (!zoomed) { b->buttons |= BTN_JUMP; b->action = PP_ACT_JUMP; } }   // (sights up: they come down first - a jump meanwhile was ignored, "rose 0.00")
             m->vaultUntil = m->jumpFrom + (swimming ? 1800 : 1300); m->jumpUntil = m->jumpFrom + (swimming ? 900 : 300); m->waterJump = swimming; b->buttons &= ~BTN_ZOOM; memcpy(m->vaultLand, g_lastLand, 12);
             memcpy(m->vaultFrom, p, 12); m->vaultTop = p[1];
-            m->vaults++; if (swimming) g_swimVaults++;
+            g_jumpUsed[i] = g_jumpMode == 3 ? (int)(m->vaults % 3) : g_jumpMode; m->vaults++; if (swimming) g_swimVaults++;
             if (g_vaultCount++ < 40) H->log("move: %s vaults a %.2f m obstacle at %.0f %.0f %.0f%s", (char *)b->player + OFF_PLAYER_NAME, top, p[0], p[1], p[2], swimming ? " (out of the water)" : "");
             return 1;
         }
@@ -332,6 +367,8 @@ static void movement_force_vault(int i, Bot *b, ULONGLONG t)
 
 static void movement_dump(void)
 {
+    H->log("move: by jump input - both: %u over / %u came back; action only: %u / %u; button only: %u / %u (jumpmode %d)",
+           g_jmStat[0][0], g_jmStat[0][1], g_jmStat[1][0], g_jmStat[1][1], g_jmStat[2][0], g_jmStat[2][1], g_jumpMode);
     H->log("move: since last: %u vault(s) / jump(s) over low obstacles (%u got over, %u didn't, %u of those blind / blocked by a player), %u waited for a player in the way, %u out of the water, %u sprint frame(s)",
            g_vaultCount, g_vaultOk, g_vaultFail, g_vaultBlind, g_vaultWait, g_swimVaults, g_sprintFrames);
     g_swimVaults = 0;

@@ -181,12 +181,11 @@ static int pool_exit(Bot *b, void *soldier, const float *pos, ULONGLONG t)
         if (!wet && t >= b->pitLookAt) {
             b->pitLookAt = t + 1000;
             const float *w = b->npts && b->wp < b->npts ? &b->path[b->wp * 3] : b->target;
-            if ((stuck && t - b->progressAt >= 5000) || (w[1] > pos[1] + 0.6f && dist2d(pos, w) < 8) || dist2d(pos, b->target) > 12) pit = soldier_in_pit(pos);
+            if ((stuck && t - b->progressAt >= 5000) || (w[1] > pos[1] + 0.6f && dist2d(pos, w) < 8 && t - b->progressAt >= 1500)) pit = soldier_in_pit(pos);
         }
         if (!wet && !pit) return 0;
         if (!pool_rim(pos, b->poolRim)) return 0;
         b->poolSince = b->poolTry = t;
-        pit_note(pos);
         static unsigned logged;
         if (logged++ < 40) H->log("pool: %s stuck in %s at %.0f %.0f %.0f - climbs out at %.0f %.0f %.0f", (char *)b->player + OFF_PLAYER_NAME, wet ? "water" : "a pit (empty pool / ditch)", pos[0], pos[1], pos[2], b->poolRim[0], b->poolRim[1], b->poolRim[2]);
     }
@@ -200,6 +199,7 @@ static int pool_exit(Bot *b, void *soldier, const float *pos, ULONGLONG t)
     if (t - b->poolTry > 12000) {
         g_poolFailed++; g_rimFail[g_rimFailN % 32][0] = b->poolRim[0]; g_rimFail[g_rimFailN % 32][1] = b->poolRim[2]; g_rimFailN++;
         static unsigned logged; if (logged++ < 40) H->log("pool: %s not out at %.0f %.0f %.0f after 12 s - tries another spot (%u out, %u spots failed so far)", (char *)b->player + OFF_PLAYER_NAME, b->poolRim[0], b->poolRim[1], b->poolRim[2], g_poolOut, g_poolFailed);
+        pit_note(pos);   // (12 s in and still here: a real trap - no way into it for the rest)
         if (!pool_rim(pos, b->poolRim)) { b->poolSince = 0; return 0; }
         b->poolTry = t;
     }

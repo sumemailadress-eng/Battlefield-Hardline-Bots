@@ -709,6 +709,7 @@ __declspec(dllexport) void thugbot_command(char *line)
     else if (!strcmp(line, "vehscan")) InterlockedExchange(&g_vehScan, 1);
     else if (!strcmp(line, "vehprobe")) InterlockedExchange(&g_vehProbe, 1);
     else if (!strncmp(line, "supplies ", 9)) { g_set.supplies = atoi(line + 9) != 0; H->log("supplies: bots %s kits for teammates", g_set.supplies ? "drop" : "don't drop"); }
+    else if (!strncmp(line, "jumpmode ", 9)) { g_jumpMode = atoi(line + 9); H->log("jumpmode %d (0 both, 1 action, 2 button, 3 alternate)", g_jumpMode); }
     else if (!strcmp(line, "refine")) refine_dump();
     else if (!strncmp(line, "refine ", 7)) { g_refineOn = atoi(line + 7) != 0; refine_dump(); }
     else if (!strncmp(line, "vehicles ", 9)) { g_set.vehicles = atoi(line + 9) != 0; H->log("vehicles: bots %s vehicles", g_set.vehicles ? "use" : "don't use"); }

@@ -1013,7 +1013,7 @@ static void combat_tick_inner(int i, Bot *b, void *soldier, int team)
     aim_at(b, f, soldier, es, d, &ye, &pe);
     if (d <= P->advanceStop) close_moves(i, b, f, d, p, q);
     else {
-        b->fwd *= 0.75f; b->strafe *= 0.75f;   // walking the route while shooting
+        b->fwd *= 0.9f; b->strafe *= 0.9f;   // walking the route while shooting (the tester 2026-10-26: "make them use routes while still fighting" - was 0.75)
         // Under fire at range: side-step while shooting back (a standing target is an easy one).
         if (justHit || t - f->hurtAt < 2500) {
             if (t >= f->dodgeEnd) { unsigned r = (unsigned)(t / 53) * 2654435761u + i * 40503u; f->dodgeDir = (r >> 7) & 1 ? 1 : -1; f->dodgeEnd = t + 500 + (r >> 9) % 600; }
@@ -1047,7 +1047,7 @@ static void combat_tick_inner(int i, Bot *b, void *soldier, int team)
     // (the tester: "firing from the hip" - sights from 5 m now; was 12 m. Walking while aiming only slows to 70%.)
     if (d > 5 && t - f->firstSeenAt > 150) {
         b->buttons |= BTN_ZOOM; b->buttons &= ~BTN_SPRINT;
-        if (d > P->advanceStop) { b->fwd *= 0.7f; if (!(justHit || t - f->hurtAt < 2500)) b->strafe *= 0.7f; }
+        if (d > P->advanceStop) { b->fwd *= 0.85f; if (!(justHit || t - f->hurtAt < 2500)) b->strafe *= 0.85f; }   // (0.7 until 2026-10-26: with 0.75 above, bots fighting crawled along their routes at half speed)
     }
     fire_control(b, f, d, ye, pe, 0);
     if (ducking) b->buttons &= ~(BTN_FIRE | BTN_ZOOM);   // (down behind the cover: not shooting into it)
