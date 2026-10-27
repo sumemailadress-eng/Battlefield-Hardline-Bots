@@ -1,0 +1,32 @@
+name: Build Thugbot for Windows x64
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable MSVC x64 build tools
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Compile loader and core
+        shell: cmd
+        run: |
+          cd Source
+          if not exist out mkdir out
+          cl /nologo /O2 /W3 /MT /LD /Foout\ src\loader.c /Fe:out\xinput9_1_0.dll /link kernel32.lib
+          if errorlevel 1 exit /b 1
+          cl /nologo /O2 /W3 /MT /LD /D_CRT_SECURE_NO_WARNINGS /Foout\ src\core.c src\nav.c src\learn.c src\trace_nav.c /Fe:out\ThugbotCore.dll /link kernel32.lib
+          if errorlevel 1 exit /b 1
+      - name: Upload freshly compiled DLLs
+        uses: actions/upload-artifact@v4
+        with:
+          name: Thugbot-Windows-x64
+          path: |
+            Source/out/ThugbotCore.dll
+            Source/out/xinput9_1_0.dll
+          if-no-files-found: error
