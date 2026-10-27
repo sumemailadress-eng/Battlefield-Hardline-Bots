@@ -75,6 +75,7 @@ static const unsigned char *drive_mask(void);   // drive.inc
 static void camp_level_reset(void);     // camp.inc
 static void ctf_level_reset(void);      // ctf.inc
 static void rescue_level_reset(void);   // rescue.inc
+static void autoequip_level_reset(void); // fresh primary-weapon selection at soldier spawn
 static float air_below(const float *p);   // parachute.inc
 static int pool_exit(Bot *b, void *soldier, const float *pos, ULONGLONG t);   // pool.inc
 static int soldier_in_pit(const float *p);   // pool.inc
@@ -229,6 +230,7 @@ static void brain_level_reset(void)
     g_learnBlocked = 0;
     if (g_learn) { bl_free(g_learn); free(g_learn); g_learn = NULL; }
     memset(g_bot, 0, sizeof g_bot);
+    autoequip_level_reset();
     combat_level_reset();   // [combat.inc hook]
     routes_level_reset();
     lifts_level_reset();
@@ -1634,6 +1636,73 @@ static void route_test_tick(void)
            nav_node_clearance(g_nav, p[0], p[1], p[2]));
 }
 static void perf_part(int k, LARGE_INTEGER *since);   // core.c
+// Selecting a gun is separate from pressing Fire. Hardline pseudo-players have no client to choose
+// their primary on deployment, and our input replacement overwrites the engine's random action
+// every frame. Ask the game to select the primary after each on-foot spawn (and once more after
+// deployment has settled). These are selections, NOT weapon grants: a soldier with an empty
+// loadout still needs its inventory assigned by the game's spawn/loadout system.
+typedef struct AutoEquip {
+    void *player, *soldier;
+    ULONGLONG started;
+    unsigned char requested;
+} AutoEquip;
+static AutoEquip g_autoEquip[MAX_BOTS];
+static int g_autoEquipOn = 1;
+static unsigned g_autoEquipRequests;
+
+static void autoequip_level_reset(void)
+{
+    memset(g_autoEquip, 0, sizeof g_autoEquip);
+}
+
+// Runs AFTER bot_think, so even bots returning early for routes / vehicles can select their gun.
+// Output is consumed by h_ppInput / h_inputCopy in the next pseudo-player update.
+static void autoequip_tick(int i, Bot *b)
+{
+    AutoEquip *e = &g_autoEquip[i];
+    void *pl = H->bots[i];
+    void *s = pl ? bot_soldier(pl) : NULL;
+    if (e->player != pl || e->soldier != s) {
+        e->player = pl; e->soldier = s; e->started = 0; e->requested = 0;
+    }
+    if (!g_autoEquipOn || !s || b->inVehicle) return;
+    ULONGLONG t = now_ms();
+    if (!e->started) e->started = t;
+    static const unsigned delays[] = { 400, 1900, 4500 };
+    for (int k = 0; k < 3; k++) {
+        ULONGLONG age = t - e->started;
+        if (age < delays[k] || age >= delays[k] + 200) continue;
+        // Let a grenade throw, melee or other explicit pseudo-player action finish first.
+        if (b->action != 0 && b->action != 9) return;
+        // Both paths exist in Hardline: pseudo-player action 9 (SwitchPrimaryWeapon) and the
+        // EIASwitchToPrimaryWeapon input hash. Selecting the primary is idempotent.
+        b->action = 9;
+        b->buttons |= BTN_PRIMARY;
+        b->buttons &= ~(BTN_FIRE | BTN_ZOOM);
+        if (!(e->requested & (1u << k))) {
+            e->requested |= (unsigned char)(1u << k);
+            g_autoEquipRequests++;
+            H->log("weapon: %s requested primary selection %d/3 (action 9 + primary input; inventory not verified)",
+                   (char *)pl + OFF_PLAYER_NAME, k + 1);
+        }
+        return;
+    }
+}
+
+static void autoequip_dump(void)
+{
+    int live = 0, requested = 0, pending = 0;
+    for (int i = 0; i < H->botCount; i++) {
+        if (!g_autoEquip[i].soldier) continue;
+        live++;
+        if (g_autoEquip[i].requested) requested++;
+        else pending++;
+    }
+    H->log("weapons: autoequip %s, %d on-foot soldiers tracked, %d requested primary, %d pending, %u requests since core load",
+           g_autoEquipOn ? "on" : "off", live, requested, pending, g_autoEquipRequests);
+    H->log("weapons: selection does not create a gun; if bots remain unarmed, check server-side loadout/inventory initialization");
+}
+
 static void brain_tick(void)
 {
     LARGE_INTEGER pt; QueryPerformanceCounter(&pt);
@@ -1667,6 +1736,7 @@ static void brain_tick(void)
         // (Every bot thinks every frame: thinking every other frame with 40+ bots made turning overshoot - the turn input
         // is a rate, held for two frames it turned twice as far - and movement jittered. the tester 2026-10-23.)
         bot_think(i);
+        autoequip_tick(i, &g_bot[i]);
         // (spawn vehicles: drive.inc drives them now - spawn_vehicle_exit() no longer runs)
         jumptest_bot(i, &g_bot[i]);
         drivetest_bot(i, &g_bot[i]);
