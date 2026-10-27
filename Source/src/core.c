@@ -671,6 +671,8 @@ __declspec(dllexport) void thugbot_command(char *line)
     else if (!strcmp(line, "players")) InterlockedExchange(&g_playersDump, 1);
     else if (!strcmp(line, "bots")) InterlockedExchange(&g_botsDump, 1);
     else if (!strcmp(line, "combat")) InterlockedExchange(&g_combatDump, 1);
+    else if (!strcmp(line, "weapons")) autoequip_dump();
+    else if (!strncmp(line, "autoequip ", 10)) { g_autoEquipOn = atoi(line + 10) != 0; H->log("weapons: autoequip %s", g_autoEquipOn ? "on" : "off"); }
     else if (!strcmp(line, "doors")) InterlockedExchange(&g_doorsDump, 1);
     else if (!strncmp(line, "trace ", 6)) { g_traceBot = atoi(line + 6); g_traceFrames = 200; }
     else if (!strncmp(line, "backward ", 9)) { g_noBackward = strcmp(line + 9, "on") != 0; H->log("backward movement %s", g_noBackward ? "off" : "on"); }
