@@ -63,6 +63,7 @@ SETTINGS (Battlefield_BFH_Server\Thugbot.ini)
   DefendShare  part of each team that defends owned flags (0 - 0.8)
   Vehicles     1 = bots drive and ride vehicles, 0 = they stay on foot (default)
   Combat, Peek leave at 1
+  AutoEquip   on by default in the bot core; switch with the 'autoequip 0/1' command
 Changes apply when the server starts, or at once by writing "ini" into Battlefield_BFH_Server\Thugbot_cmd.txt.
 
 
@@ -102,6 +103,8 @@ from Thugbot_cmd.txt (one per write), for example:
   perf        how much server time the bots use      unblock     forget temporary blocked paths
   routes rebuild   re-make the current map's saved routes
   navrebuild       re-scan the current map
+  weapons          show automatic primary-selection attempts (not proof of a loaded inventory)
+  autoequip 0/1    disable/enable selecting a primary weapon on each on-foot spawn
 
 
 UNINSTALL
@@ -115,6 +118,10 @@ TROUBLESHOOTING
 - "A Hardline server is already running": close it (or use Stop in the control window) and start again.
 - No bots: check Thugbot_25200.log in the server folder. "core loaded" means the mod is running.
 - MySQL won't start: run BF-Portable's Repair-MySQL-Privileges.bat, then Start MySQL again.
+- Bots spawn with no weapon selected: check the log for 'weapon: ... requested primary selection'.
+  The core requests the primary at 0.4, 1.9 and 4.5 seconds after each on-foot spawn.
+  If they are still empty-handed, their loadout/inventory was not granted by the server:
+  input actions cannot create a weapon. Use the 'weapons' command to see selection attempts.
 - Bots stuck somewhere on a new map: give it a round; they learn the spot, and routes you walk
   there are used first. "routes rebuild" re-makes the saved routes of the current map.
 - Server feels slow with 60 bots: use fewer bots per team.
