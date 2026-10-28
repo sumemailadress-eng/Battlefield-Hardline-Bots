@@ -14,6 +14,8 @@ WHAT YOU NEED
 - Battlefield Hardline set up for BF-Portable on the PC you play on.
 - Nothing else. Visual Studio is only needed to change the source code.
 
+*Important notice*
+Unlock All must be selected when creating a server in BF-Portable or else bots will not have any weapons or equipment.
 
 INSTALL (once)
 --------------
