@@ -1436,7 +1436,7 @@ int nav_find_path_sync(const NavGrid *g, NavRayFn ray, float sx, float sy, float
             if ((d & 1) && step_node(g, cur, (d + 7) & 7) < 0 && step_node(g, cur, (d + 1) & 7) < 0) continue;
             float climb = g->height[nb] - g->height[cur];
             float step = ((d & 1) ? 1.4142f : 1.0f) * g->cell;
-            static const float kDriveCost[8] = {1.0f, 0.5f, 1.0f, 1.6f, 2.5f, 12.0f, 1.0f, 1.0f};   // 5: within 2.5 m of a tree
+            static const float kDriveCost[8] = {1.0f, 0.5f, 1.0f, 1.6f, 2.5f, 12.0f, 0.2f, 1.0f};   // 5: within 2.5 m of a tree; 6: a driven / scanned road (drive.inc)
             float mul = g_pathMask ? kDriveCost[g_pathMask[nb] & 7] : (g->flags[nb] & NAV_WATER) ? WATER_COST_MUL :
                         g_roadMask && g_roadMask[nb] == 1 ? 0.6f : g_roadMask && g_roadMask[nb] == 2 ? 0.85f : 1.0f;   // roads
             if (!g_pathMask && g_treeDist && g_treeDist[nb] <= TREE_NEAR_DM) mul *= 6.0f;   // round a tree, not into it

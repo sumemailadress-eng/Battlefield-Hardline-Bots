@@ -1,5 +1,6 @@
 ThugBot - player bots for a Battlefield Hardline server (BF-Portable)
 =====================================================================
+Version 0.2, early release. What changed: PATCHNOTES.txt. Vehicles are not officially supported yet.
 
 ThugBot fills a Battlefield Hardline dedicated server with bots that play like players: they capture and
 defend flags, fight with cover, crouch, vault, open doors, knife glass, throw grenades, use grenade
@@ -14,8 +15,6 @@ WHAT YOU NEED
 - Battlefield Hardline set up for BF-Portable on the PC you play on.
 - Nothing else. Visual Studio is only needed to change the source code.
 
-*Important notice*
-Unlock All must be selected when creating a server in BF-Portable or else bots will not have any weapons or equipment.
 
 INSTALL (once)
 --------------
@@ -63,7 +62,7 @@ SETTINGS (Battlefield_BFH_Server\Thugbot.ini)
   Difficulty   easy / normal / hard / veteran / elite   (aim, reaction, how far they see)
   Aggression   0 cautious, 1 normal, 2 aggressive
   DefendShare  part of each team that defends owned flags (0 - 0.8)
-  Vehicles     1 = bots drive and ride vehicles, 0 = they stay on foot (default)
+  Vehicles     0 = bots stay on foot (default), 1 = they drive and ride vehicles (experimental, not officially supported yet)
   Combat, Peek leave at 1
 Changes apply when the server starts, or at once by writing "ini" into Battlefield_BFH_Server\Thugbot_cmd.txt.
 
@@ -76,13 +75,15 @@ You can also mark routes yourself, with hotkeys (Start-Thugbot starts them; or r
   F7  add one point where you stand           F8  undo the last point
   F9  clear the points                        F10 elevator / ladder end (bottom, then top)
   F11 bots in your vehicle get out
-or with chat commands: !wp  !rec  !stop  !save  !undo  !clear  !delete  !routes  !lift  !out
+or with chat commands: !wp  !rec  !stop  !save  !vsave  !undo  !clear  !delete  !routes  !lift  !out
+(!vsave saves the points as a vehicle route: experimental, see PATCHNOTES.txt)
 The hotkeys act for the player name given with -Player (Start-Thugbot / Thugbot-Keys).
 
 
 FILES IN THIS FOLDER
 --------------------
   out\                    the mod: xinput9_1_0.dll (loader) + ThugbotCore.dll (the bots)
+  PATCHNOTES.txt          what changed in each version
   Thugbot.ini             default settings
   Data\Thugbot_nav        walkable-ground maps per level (rebuilt automatically when missing)
   Data\Thugbot_learned    doors, glass, vaults, elevators, stuck spots, player routes per level
@@ -95,6 +96,7 @@ FILES IN THIS FOLDER
   Thugbot-Keys.bat        route hotkeys (F5 - F11)
   Thugbot-Chat.ps1        the chat-command bridge (started by Start-Thugbot)
   Open-Thugbot-Map.bat    the learned-map page
+  Open-Thugbot-3DMap.bat  3D map of the bots' scan: view, draw and edit routes (needs Node.js; tools\Map3D)
   Source\                 full source code, build.bat (Visual Studio 2019 Build Tools, x64), tools
 
 In the server folder the mod writes Thugbot_25200.log (what the bots do) and reads commands
@@ -121,5 +123,6 @@ TROUBLESHOOTING
   there are used first. "routes rebuild" re-makes the saved routes of the current map.
 - Server feels slow with 60 bots: use fewer bots per team.
 
-Known limits: bots don't fly helicopters or drive boats; vehicle driving is basic (off by default);
+Known limits: vehicles are not officially supported yet (off by default, driving is rough); bots don't fly
+helicopters or drive boats; vaults and water exits still fail sometimes (see PATCHNOTES.txt);
 the objective modes Heist / Blood Money / Hotwire / Crosshair / Rescue are played as "hunt the enemy".

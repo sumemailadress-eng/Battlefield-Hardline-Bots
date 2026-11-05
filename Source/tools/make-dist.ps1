@@ -11,8 +11,8 @@ $dst = Join-Path $root "dist\$name"
 if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
 New-Item -ItemType Directory -Force $dst, "$dst\out", "$dst\Data", "$dst\Source" | Out-Null
 
-foreach ($f in 'README.txt', 'Setup-Thugbot.bat', 'Setup-Thugbot.ps1', 'Thugbot-Paths.ps1', 'Start-Thugbot.bat', 'Start-Thugbot.ps1', 'Thugbot-Control.bat', 'Thugbot-Control.ps1', 'Thugbot-Keys.bat',
-               'Thugbot-Keys.ps1', 'Thugbot-Chat.ps1', 'Open-Thugbot-Map.bat', 'Install-Thugbot.ps1', 'Uninstall-Thugbot.ps1') {
+foreach ($f in 'README.txt', 'PATCHNOTES.txt', 'Setup-Thugbot.bat', 'Setup-Thugbot.ps1', 'Thugbot-Paths.ps1', 'Start-Thugbot.bat', 'Start-Thugbot.ps1', 'Thugbot-Control.bat', 'Thugbot-Control.ps1', 'Thugbot-Keys.bat',
+               'Thugbot-Keys.ps1', 'Thugbot-Chat.ps1', 'Open-Thugbot-Map.bat', 'Open-Thugbot-3DMap.bat', 'Install-Thugbot.ps1', 'Uninstall-Thugbot.ps1') {
     Copy-Item (Join-Path $root $f) $dst
 }
 Copy-Item "$root\out\xinput9_1_0.dll", "$root\out\ThugbotCore.dll" "$dst\out"
@@ -47,6 +47,11 @@ Get-ChildItem "$Server\Thugbot_routes" -File -Filter "*.$routeVer.routes" | Copy
 # Source
 Copy-Item "$root\src" "$dst\Source\src" -Recurse
 Copy-Item "$root\tools" "$dst\Source\tools" -Recurse
+Remove-Item "$dst\Source\tools\Map3D\cache" -Recurse -Force -ErrorAction SilentlyContinue   # (point-cloud cache: rebuilt from the grids)
+# 3D map (Open-Thugbot-3DMap.bat runs tools\Map3D\server.js; its cache is rebuilt from the grids)
+New-Item -ItemType Directory -Force "$dst\tools" | Out-Null
+Copy-Item "$root\tools\Map3D" "$dst\tools\Map3D" -Recurse
+Remove-Item "$dst\tools\Map3D\cache" -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item "$root\build.bat" "$dst\Source"
 # (PORT-PLAN.md - the work log - stays out: it names this PC's folders and players. Thugbot-Paths.ini too: each PC
 # makes its own with Setup-Thugbot.bat.)
@@ -59,7 +64,7 @@ Get-ChildItem "$dst\Source" -Recurse -File -Include *.c, *.h, *.inc, *.ps1, *.sh
 # Nothing personal in the package: no player name, no folders or addresses of this PC.
 . (Join-Path $root 'Thugbot-Paths.ps1'); $me = Get-ThugbotConfig -NoSearch
 $bad = @(('D:' + '\BF-Portable'), ('/d/' + 'BF-Portable'), $env:USERNAME, $env:COMPUTERNAME, $me.Name, $me.Portable, $me.Server) | Where-Object { $_ -and $_.Length -ge 3 } | Select-Object -Unique
-$text = '*.ps1', '*.bat', '*.txt', '*.md', '*.ini', '*.c', '*.h', '*.inc', '*.sh', '*.py'
+$text = '*.ps1', '*.bat', '*.txt', '*.md', '*.ini', '*.c', '*.h', '*.inc', '*.sh', '*.py', '*.js', '*.html'
 $hits = @(Get-ChildItem $dst -Recurse -File -Include $text | Select-String -SimpleMatch -Pattern $bad)
 foreach ($ip in @((Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -notlike '127.*' }).IPAddress)) {
     $hits += @(Get-ChildItem $dst -Recurse -File -Include $text | Select-String -SimpleMatch -Pattern $ip)

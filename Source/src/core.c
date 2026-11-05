@@ -389,6 +389,7 @@ static void players_refresh(void)
 
 static volatile LONG g_ctfScanDo;   // "ctfscan" (run on the game thread in brain_tick)
 #include "brain.inc"
+#include "vault_hook.inc"
 
 // "players": every pseudo-player's ServerPlayer (0x2000 bytes each) to Thugbot_players.bin, to find fields such as
 // the team by comparing against RCON's listPlayers.
@@ -568,6 +569,7 @@ static void h_ppmUpdate(void *mgr, int a2, float dt)
         perf_note((double)(c.QuadPart - a.QuadPart), g_raysTotal - rays0);
     }
     yaw_test_tick();
+    if (world) vault_tick();
 }
 
 // ---- bot bullets count: mark hits from a bot's gun as client-confirmed (see RVA_SOLDIER_ON_DAMAGE) ----
@@ -646,6 +648,7 @@ __declspec(dllexport) int thugbot_init(ThugbotHost *host)
     o_cpUpdate = (CpUpdate_t)hook_call(&g_hookCp, RVA_CP_UPDATE_CALL, RVA_CP_UPDATE, (void *)h_cpUpdate, 2);
     o_seqLevelLoaded = (SeqLevelLoaded_t)hook_call(&g_hookSeq, RVA_SEQ_LEVEL_LOADED_CALL, RVA_SEQ_LEVEL_LOADED, (void *)h_seqLevelLoaded, 3);
     o_inputCopy = (InputCopy_t)hook_call(&g_hookCopy, RVA_PP_INPUT_COPY_CALL, RVA_INPUT_COPY, (void *)h_inputCopy, 4);
+    H->log("vault hook none, carry %s (velocity from soldier+0x70)", g_vaultMove ? "on" : "off");
     int dmgHook = hook_vtable_slot(&g_onDamageSlot, RVA_SOLDIER_ON_DAMAGE_VT, RVA_SOLDIER_ON_DAMAGE, (void *)h_onDamage, (void **)&o_onDamage);
     int ctfHook = hook_vtable_slot(&g_ctfSlot, CTF_MSG_VT_SLOT, CTF_MSG_FN, (void *)h_ctfOnMsg, (void **)&o_ctfOnMsg);
     if (H->levelKey[0]) strcpy(g_levelKey, H->levelKey);
@@ -690,6 +693,9 @@ __declspec(dllexport) void thugbot_command(char *line)
     else if (!strcmp(line, "learnsave")) learn_save();
     else if (!strncmp(line, "presshash ", 10)) { g_testHash = (unsigned)strtoul(line + 10, NULL, 16); H->log("presshash %#x", g_testHash); }
     else if (!strncmp(line, "learnroutes ", 12)) { g_learnRoutes = atoi(line + 12); H->log("learning mode %s", g_learnRoutes ? "on" : "off"); }
+    else if (!strcmp(line, "vaultstat")) vault_stat();
+    else if (!strcmp(line, "vnetsnap")) vnet_snap();
+    else if (!strncmp(line, "vaultmove ", 10)) { g_vaultMove = atoi(line + 10); H->log("vaultmove %d", g_vaultMove); }
     else if (!strncmp(line, "vaulttp ", 8)) { g_vaultTeleport = atoi(line + 8); H->log("vault placing %s", g_vaultTeleport ? "on" : "off"); }
     else if (!strncmp(line, "heli ", 5)) { g_heliMode = atoi(line + 5); H->log("heli: mode %d (0 get out, 1 control probe, 2 fly)", g_heliMode); }
     else if (!strncmp(line, "drivetest", 9)) {

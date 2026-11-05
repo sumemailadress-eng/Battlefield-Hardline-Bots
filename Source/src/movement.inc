@@ -14,7 +14,8 @@
 typedef struct MoveX { float vaultLand[3], tpTo[3]; ULONGLONG tpCheckAt, duckLook, duckUntil; int hadZoom; ULONGLONG vaultUntil, jumpUntil, jumpFrom, nextLook, sprintSlot; int sprinting; unsigned vaults; float vaultFrom[3], vaultTop, vaultDir[2];
                        int blind; float jumpDist, jumpSpeed, jumpTop; ULONGLONG runupUntil; int runups; float runupAt[3]; int waterJump, squareTries; } MoveX;   // blind: a stuck / forced jump (no low obstacle seen) - a failure says nothing about the spot
 static float g_lastHitDist;   // low_obstacle: how far ahead the obstacle's face is
-static float g_vaultMaxH = 1.05f;   // low_obstacle: tallest top it takes (swimming: higher - the body sits low in the water)
+static float g_vaultMaxH = 1.3f;    // low_obstacle: tallest top it takes (swimming: higher - the body sits low in the water; 1.3 m since the carry, vault_hook.inc)
+static void extern_vault_window(ULONGLONG until);   // vault_hook.inc
 static MoveX g_mx[MAX_BOTS];
 static unsigned g_vaultCount, g_sprintFrames, g_vaultOk, g_vaultFail, g_vaultLogged, g_tpOk, g_tpFail;
 static float g_lastLand[3];   // low_obstacle: where it would land on the far side
@@ -216,7 +217,7 @@ static int movement_tick(int i, Bot *b, void *soldier, const float *aim)
             { float tl; m->vaultLand[0] = m->vaultLand[2] = 0; if (low_obstacle(p, dx / dl, dz / dl, 1.6f, &tl)) memcpy(m->vaultLand, g_lastLand, 12); }   // (a learned jump spot: the far side if it is a low obstacle)
             // (these three used to sit inside the comment above: a learned-spot vault was judged on the last vault's
             // height and direction, failed, and wrote the spot off)
-            m->vaultTop = p[1]; m->vaultDir[0] = dx / dl; m->vaultDir[1] = dz / dl; m->blind = 0; m->jumpTop = 0; m->waterJump = 0;
+            m->vaultTop = p[1]; m->vaultDir[0] = dx / dl; m->vaultDir[1] = dz / dl; m->blind = 0; m->jumpTop = 0; m->waterJump = 0; extern_vault_window(m->vaultUntil);
             g_jumpUsed[i] = g_jumpMode == 3 ? (int)(m->vaults % 3) : g_jumpMode; m->vaults++; g_vaultCount++;
             return 1;
         }
@@ -228,13 +229,13 @@ static int movement_tick(int i, Bot *b, void *soldier, const float *aim)
     int swimming = g_nav && nav_is_water(g_nav, p[0], p[1], p[2]);
     if (dl > 0.5f && b->fwd > 0.5f && t >= m->nextLook) {
         m->nextLook = t + 150;
-        g_vaultMaxH = swimming ? 1.9f : 1.05f;
+        g_vaultMaxH = swimming ? 1.9f : 1.3f;
         if (swimming) g_swimLooks++;
         dx /= dl; dz /= dl;
         float top;
         int justSpawned = b->spawnAt && t - b->spawnAt < 2000;   // (round start: 14 of 20 "rose 0.00" fails were bots still in the spawn pose)
         int lowAhead = !justSpawned && !on_stairs(b, p) && !bad_vault(p, dx, dz) && low_obstacle(p, dx, dz, 1.3f, &top);
-        g_vaultMaxH = 1.05f;   // (back to the land value for every other caller)
+        g_vaultMaxH = 1.3f;   // (back to the land value for every other caller)
         if (lowAhead) {
             // Seen 1.3 m out: keep running at it and jump when the face is under 0.85 m away. Jumping at 1.3 m landed
             // the bot short, against the obstacle, and the game snapped it back. Someone in the way: wait for them.
@@ -279,7 +280,7 @@ static int movement_tick(int i, Bot *b, void *soldier, const float *aim)
                 }
                 m->runups = 0;
             }
-            if (swimming) {   // square on to the ledge first: the climb out took only when facing it (1 in 9 worked at an angle)
+            {   // square on to the ledge first (on land too): the climb out took only when facing it (1 in 9 worked at an angle)
                 float best = 1e9f, bestA = atan2f(dx, dz), a0 = bestA;
                 for (int k = -6; k <= 6; k++) {
                     float a = a0 + k * 0.1745f, e0[3] = { p[0], p[1] + 0.6f, p[2] }, e1[3] = { p[0] + sinf(a) * 1.5f, p[1] + 0.6f, p[2] + cosf(a) * 1.5f }, h[3];
@@ -298,7 +299,7 @@ static int movement_tick(int i, Bot *b, void *soldier, const float *aim)
             { const float *v = (const float *)((char *)soldier + OFF_SOLDIER_VELOCITY); m->jumpSpeed = v[0] * dx + v[2] * dz; m->jumpDist = g_lastHitDist; m->jumpTop = top; }
             { int zoomed = (b->buttons & BTN_ZOOM) != 0; m->hadZoom = zoomed; m->jumpFrom = t + (zoomed ? 220 : 0); if (!zoomed) { b->buttons |= BTN_JUMP; b->action = PP_ACT_JUMP; } }   // (sights up: they come down first - a jump meanwhile was ignored, "rose 0.00")
             m->vaultUntil = m->jumpFrom + (swimming ? 1800 : 1300); m->jumpUntil = m->jumpFrom + (swimming ? 900 : 300); m->waterJump = swimming; b->buttons &= ~BTN_ZOOM; memcpy(m->vaultLand, g_lastLand, 12);
-            memcpy(m->vaultFrom, p, 12); m->vaultTop = p[1];
+            memcpy(m->vaultFrom, p, 12); m->vaultTop = p[1]; extern_vault_window(m->vaultUntil);
             g_jumpUsed[i] = g_jumpMode == 3 ? (int)(m->vaults % 3) : g_jumpMode; m->vaults++; if (swimming) g_swimVaults++;
             if (g_vaultCount++ < 40) H->log("move: %s vaults a %.2f m obstacle at %.0f %.0f %.0f%s", (char *)b->player + OFF_PLAYER_NAME, top, p[0], p[1], p[2], swimming ? " (out of the water)" : "");
             return 1;
@@ -347,8 +348,9 @@ static void movement_unstick(int i, Bot *b, ULONGLONG t)
     int low = !on_stairs(b, p) && (low_obstacle(p, sinf(yaw), cosf(yaw), 1.2f, &top) || (dl > 0.5f && low_obstacle(p, dx / dl, dz / dl, 1.2f, &top)));
     if (!low) return;
     b->buttons |= BTN_JUMP; b->action = PP_ACT_JUMP;
-    m->vaultUntil = t + 700; m->jumpUntil = t + 300; m->vaultDir[0] = sinf(yaw); m->vaultDir[1] = cosf(yaw);
-    memcpy(m->vaultFrom, p, 12); m->vaultTop = p[1]; m->blind = 1; m->jumpTop = 0; m->jumpFrom = t;
+    memcpy(m->vaultLand, g_lastLand, 12); m->jumpTop = top; extern_vault_window(t + 1300);
+    m->vaultUntil = t + 1300; m->jumpUntil = t + 300; m->vaultDir[0] = sinf(yaw); m->vaultDir[1] = cosf(yaw);
+    memcpy(m->vaultFrom, p, 12); m->vaultTop = p[1]; m->blind = 1; m->jumpFrom = t;
 }
 
 // Jump / vault forwards without the height test (a bot stuck twice at the same spot): a fence or gate the rays misjudged.
@@ -359,10 +361,14 @@ static void movement_force_vault(int i, Bot *b, ULONGLONG t)
     if (!s) return;
     const float *p = soldier_pos(s);
     if (on_stairs(b, p)) return;
-    float yaw = soldier_yaw(s);
+    float yaw = soldier_yaw(s), top = 0, tx = b->target[0] - p[0], tz = b->target[2] - p[2], tl = sqrtf(tx * tx + tz * tz);
     b->buttons |= BTN_JUMP | BTN_SPRINT; b->action = PP_ACT_JUMP;
-    m->vaultUntil = t + 700; m->jumpUntil = t + 300; m->vaultDir[0] = sinf(yaw); m->vaultDir[1] = cosf(yaw);
-    memcpy(m->vaultFrom, p, 12); m->vaultTop = p[1]; m->blind = 1; m->jumpTop = 0; m->jumpFrom = t;
+    m->vaultLand[0] = m->vaultLand[2] = 0; m->jumpTop = 0; extern_vault_window(t + 1300);
+    g_vaultMaxH = 1.6f;   // (stuck twice: a little more than a walking vault, whatever the rays made of it before)
+    if (low_obstacle(p, sinf(yaw), cosf(yaw), 1.6f, &top) || (tl > 0.5f && low_obstacle(p, tx / tl, tz / tl, 1.6f, &top))) { memcpy(m->vaultLand, g_lastLand, 12); m->jumpTop = top; }
+    g_vaultMaxH = 1.3f;
+    m->vaultUntil = t + (m->vaultLand[0] || m->vaultLand[2] ? 1300 : 700); m->jumpUntil = t + 300; m->vaultDir[0] = sinf(yaw); m->vaultDir[1] = cosf(yaw);
+    memcpy(m->vaultFrom, p, 12); m->vaultTop = p[1]; m->blind = 1; m->jumpFrom = t;
 }
 
 static void movement_dump(void)

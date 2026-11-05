@@ -1,0 +1,40 @@
+ThugBot patch notes
+===================
+
+V0.2 early release (2026-11-05)
+-------------------------------
+Vehicles are NOT officially supported yet. Bots stay on foot by default (Vehicles=0). You can still turn vehicles on to
+try them, but expect rough driving and cars getting stuck.
+
+Vaulting
+- New vault carry: a bot that jumps at a wall is now lifted over it to a landing spot, instead of being put back where
+  it jumped by the server.
+- Bots vault walls up to 1.3 m (was 1.05 m), and square up to the wall first.
+- A bot that ends up short of the landing is carried again, higher each time, up to 4 times.
+- Stuck bots that jump at an obstacle now get carried over it too.
+- Measured with 63 bots: 136 of 141 vaults over on Hollywood Heights, 133 of 140 on Offshore. Vaults do still fail
+  sometimes.
+
+Pools, pits and water
+- Bots climb out of pools and pits on the same carry, over rims up to 2.4 m (Hollywood Heights pool and garage pit).
+- Swimmers look up to 45 m for an easy place to get out, preferring one on the way to their target.
+- Docks and ledges up to 1.4 m above the water count as ways out.
+- Ways out of the water are learned per map, and can be placed by hand in the 3D map.
+- A bot standing on a pier is no longer treated as swimming.
+- A bot that keeps "getting out" without moving now tries another spot.
+
+Vehicles (experimental, not officially supported)
+- Saved vehicle routes are read from Thugbot_learned\<map>.vroutes. Draw them with !rec then !vsave, or in the 3D map.
+- Drivers look for ground 6 and 10 m ahead and back up rather than drive off a bridge into water.
+- Road data now saves to Thugbot_learned.
+
+Known issues
+- Water exits on Offshore still fail often, and some of its docks can't be climbed.
+- Drivers have been seen picking up a saved route, but none has been confirmed finishing one. No saved vehicle routes
+  ship with this release.
+- A driver can repeat the back-up at the same spot.
+- Bots don't fly helicopters or drive boats.
+
+V0.1 alpha (2026-10-26)
+-----------------------
+First public release.

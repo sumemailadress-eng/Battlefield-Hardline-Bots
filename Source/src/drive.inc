@@ -20,7 +20,7 @@ static const NavGrid *g_driveMaskGrid;
 static unsigned g_driveMaskSerial;
 static unsigned g_drives, g_driveArrivals, g_driveGiveUps;
 
-typedef struct Drive { int checkedFront, yield; ULONGLONG startAt, lookAt; float freeC, freeL, freeR; void *veh; ULONGLONG progressAt, reverseUntil, stoppedSince, exitFrom, noRouteSince, traceAt; float progressPos[3], reverseTurn, roadGoal[3]; int stuck; ULONGLONG turnAroundAt; float stuckYaw; int xfRejected;
+typedef struct Drive { int checkedFront, yield; ULONGLONG startAt, lookAt, edgeAt; float freeC, freeL, freeR; void *veh; ULONGLONG progressAt, reverseUntil, stoppedSince, exitFrom, noRouteSince, traceAt; float progressPos[3], reverseTurn, roadGoal[3]; int stuck; ULONGLONG turnAroundAt; float stuckYaw; int xfRejected;
                        float lastFwd, motionPos[3], motionYaw, matrixOff, avoidTurn; ULONGLONG yieldSince; ULONGLONG motionPosAt, motionAt; int motionN; } Drive;
 static Drive g_drv[MAX_BOTS];
 
@@ -223,6 +223,175 @@ static void veh_calibrate(void *v, float fwd, float turn)
     memcpy(g_vehXf[k].samplePos, p, 12);
 }
 
+// (Thugbot port 2026-10-29 from FloodBots: Hardline names are blueprint paths - HELI_..., BOAT...)
+static int name_is_air(const char *nm) { return strstr(nm, "HELI") || strstr(nm, "Heli") || strstr(nm, "heli") || strstr(nm, "JET") || strstr(nm, "PLANE"); }
+static int is_boat_name(const char *nm) { return strstr(nm, "BOAT") || strstr(nm, "Boat") || strstr(nm, "boat") || strstr(nm, "CAT_") || strstr(nm, "JETSKI"); }
+// ---- driven roads (the tester 2026-10-27: "any map I've driven or there was a successful vehicle route - use it, they need
+// to learn") ----
+// Every ground vehicle's driver - a player, or a bot whose drive got to its flag - is followed once a second; a trail of
+// 60 m+ is saved to Thugbot_learned\<map>.roads (one line per trail: x y z ...) and painted into the road map as class 6
+// (the cheapest road there is, nav.c kDriveCost) along a 3 m wide band, so bots' car routes follow what was driven.
+#define MAX_ROAD_PTS 60000
+static float (*g_roadPts)[3]; static int g_roadN;   // all trails of this map, back to back (x > 1e8: a break)
+static char g_roadsKey[64];
+static void roads_paint_seg(unsigned char *m, const float *a, const float *b)
+{
+    NavGrid *g = g_nav; float len = dist2d(a, b); int steps = (int)(len / (g->cell * 0.5f)) + 1;
+    for (int k = 0; k <= steps; k++) {
+        float f = (float)k / steps, x = a[0] + (b[0] - a[0]) * f, y = a[1] + (b[1] - a[1]) * f, z = a[2] + (b[2] - a[2]) * f;
+        for (int dz = -1; dz <= 1; dz++) for (int dx = -1; dx <= 1; dx++) {
+            int cell = nav_cell_index(g, x + dx * 1.5f, z + dz * 1.5f);
+            if (cell < 0) continue;
+            for (int l = 0; l < NAV_LAYERS; l++) { int node = cell * NAV_LAYERS + l; if ((g->flags[node] & NAV_WALKABLE) && !(g->flags[node] & NAV_WATER) && fabsf(g->height[node] - y) < 2.5f) m[node] = 6; }
+        }
+    }
+}
+// Road materials (the tester 2026-10-29: "a way to scan streets and large roads"): the ground's material under a driven road
+// (RayHit.rest +8: a material word - "matscan") is counted; the materials that make up 15%+ of a map's driven roads are
+// its road surfaces, and a background sweep (300 rays a second) marks every wide-enough spot of them as road (class 6).
+static unsigned g_rmId[32], g_rmN[32], g_rmTotal, g_rmSweep; static int g_rmSweepDone;
+static volatile LONG g_roadRescan;   // "roadscan" (Control's Vehicle scan button): forget this map's scan and run it again
+static unsigned *g_rmMarked; static unsigned g_rmMarkedN, g_rmMarkedCap;   // the nodes this scan made road (saved per map)
+// Thugbot_learned<map>.roadscan: "w h x0 z0 cell" then node numbers - loaded with the map so the scan runs once a map
+static void roadscan_save(void)
+{
+    char path[MAX_PATH]; map_path(path, sizeof path, "Thugbot_learned", ".roadscan");
+    FILE *f = fopen(path, "w"); if (!f || !g_nav) { if (f) fclose(f); return; }
+    fprintf(f, "%d %d %.3f %.3f %.3f\n", g_nav->w, g_nav->h, g_nav->x0, g_nav->z0, g_nav->cell);
+    for (unsigned k = 0; k < g_rmMarkedN; k++) fprintf(f, "%u\n", g_rmMarked[k]);
+    fclose(f);
+}
+static int roadscan_load(void)
+{
+    char path[MAX_PATH]; map_path(path, sizeof path, "Thugbot_learned", ".roadscan");
+    FILE *f = fopen(path, "r"); if (!f) return 0;
+    int w, h; float x0, z0, cell; unsigned node, n = 0, total = (unsigned)(g_nav->w * g_nav->h * NAV_LAYERS);
+    if (fscanf(f, "%d %d %f %f %f", &w, &h, &x0, &z0, &cell) != 5 || w != g_nav->w || h != g_nav->h || fabsf(x0 - g_nav->x0) > 0.01f || fabsf(z0 - g_nav->z0) > 0.01f) { fclose(f); return 0; }   // (another grid: scan again)
+    while (fscanf(f, "%u", &node) == 1) if (node < total && g_driveMask[node]) { g_driveMask[node] = 6; n++; }
+    fclose(f);
+    H->log("drive: road scan of %s loaded - %u road spot(s)", g_levelKey, n);
+    return 1;
+}
+static unsigned ground_material(const float *p)
+{
+    float a[3] = { p[0], p[1] + 1.5f, p[2] }, e[3] = { p[0], p[1] - 2.5f, p[2] }, h[3];
+    if (!ray_cast(a, e, h, NULL)) return 0;
+    return ((unsigned *)g_lastHit.rest)[2];
+}
+static void roadmat_note(const float *p)
+{
+    unsigned id = ground_material(p);
+    if (!id) return;
+    g_rmTotal++;
+    for (int k = 0; k < 32; k++) { if (g_rmId[k] == id) { g_rmN[k]++; return; } if (!g_rmId[k]) { g_rmId[k] = id; g_rmN[k] = 1; return; } }
+}
+static int roadmat_is(unsigned id)
+{
+    if (!id || g_rmTotal < 20) return 0;
+    for (int k = 0; k < 32 && g_rmId[k]; k++) if (g_rmId[k] == id) return g_rmN[k] >= 5 && g_rmN[k] * 100 >= g_rmTotal * 15;
+    return 0;
+}
+static void roadmat_sweep(void)   // 300 grid nodes a call (once a second): wide-enough ground of a road material -> class 6
+{
+    if (!g_driveMask || !g_nav || g_navBuilding || g_rmTotal < 20 || g_rmSweepDone) return;
+    NavGrid *g = g_nav; unsigned n = (unsigned)(g->w * g->h * NAV_LAYERS); int rays = 0, marked = 0;
+    if (!g_rmSweep) { g_rmMarkedN = 0; if (InterlockedExchange(&g_roadRescan, 0)) { char path[MAX_PATH]; map_path(path, sizeof path, "Thugbot_learned", ".roadscan"); remove(path); } else if (roadscan_load()) { g_rmSweepDone = 1; return; } int nm = 0; for (int k = 0; k < 32 && g_rmId[k]; k++) if (roadmat_is(g_rmId[k])) nm++; H->log("drive: road scan of %s starts - %d road surface(s) from %u samples", g_levelKey, nm, g_rmTotal); }
+    while (g_rmSweep < n && rays < 300) {
+        unsigned node = g_rmSweep++;
+        unsigned cell = node / NAV_LAYERS, x = cell % g->w, z = cell / g->w;
+        if ((x & 1) || (z & 1) || (g_driveMask[node] != 1 && g_driveMask[node] != 2)) continue;   // (every other cell, the wide ground only)
+        float q[3]; nav_node_pos(g, node, q); rays++;
+        if (!roadmat_is(ground_material(q))) continue;
+        for (int dz = 0; dz <= 1; dz++) for (int dx = 0; dx <= 1; dx++) {
+            int c2 = nav_cell_index(g, q[0] + dx * g->cell, q[2] + dz * g->cell);
+            if (c2 < 0) continue;
+            for (int l = 0; l < NAV_LAYERS; l++) { int nd = c2 * NAV_LAYERS + l; if ((g_driveMask[nd] == 1 || g_driveMask[nd] == 2) && fabsf(g->height[nd] - q[1]) < 1.5f) {
+                g_driveMask[nd] = 6; marked++;
+                if (g_rmMarkedN == g_rmMarkedCap) { unsigned nc = g_rmMarkedCap ? g_rmMarkedCap * 2 : 4096; unsigned *nm = realloc(g_rmMarked, nc * sizeof *nm); if (!nm) continue; g_rmMarked = nm; g_rmMarkedCap = nc; }
+                g_rmMarked[g_rmMarkedN++] = (unsigned)nd; } }
+        }
+    }
+    static unsigned totalMarked; totalMarked += marked;
+    if (g_rmSweep >= n) { g_rmSweepDone = 1; roadscan_save(); H->log("drive: road scan of %s done - %u spot(s) of road surface marked (from %u material samples on driven roads)", g_levelKey, totalMarked, g_rmTotal); totalMarked = 0; }
+}
+static void roads_paint_trail(unsigned char *m, float (*pts)[3], int n) { for (int k = 0; k + 1 < n; k++) if (dist2d(pts[k], pts[k + 1]) < 40) roads_paint_seg(m, pts[k], pts[k + 1]); for (int k = 0; k < n; k++) roadmat_note(pts[k]); }
+static void roads_load_paint(void)
+{
+    if (!g_driveMask) return;
+    if (strcmp(g_roadsKey, g_levelKey)) {   // a new map: read its file
+        snprintf(g_roadsKey, sizeof g_roadsKey, "%s", g_levelKey);
+        memset(g_rmId, 0, sizeof g_rmId); memset(g_rmN, 0, sizeof g_rmN); g_rmTotal = 0;
+        if (!g_roadPts) g_roadPts = malloc(sizeof *g_roadPts * MAX_ROAD_PTS);
+        g_roadN = 0;
+        char path[MAX_PATH]; map_path(path, sizeof path, "Thugbot_learned", ".roads");
+        FILE *f = fopen(path, "r"); int trails = 0;
+        if (f && g_roadPts) {
+            static char line[1 << 16];
+            while (fgets(line, sizeof line, f)) {
+                char *c = line; float x, y, z; int used, start = g_roadN;
+                while (g_roadN < MAX_ROAD_PTS - 1 && sscanf(c, "%f %f %f%n", &x, &y, &z, &used) == 3) { g_roadPts[g_roadN][0] = x; g_roadPts[g_roadN][1] = y; g_roadPts[g_roadN][2] = z; g_roadN++; c += used; }
+                if (g_roadN - start >= 2) { roads_paint_trail(g_driveMask, g_roadPts + start, g_roadN - start); trails++; }
+                if (g_roadN > start && g_roadN < MAX_ROAD_PTS) { g_roadPts[g_roadN][0] = 1e9f; g_roadN++; }
+            }
+        }
+        if (f) fclose(f);
+        H->log("drive: %d driven road(s) (%d points) loaded for %s", trails, g_roadN, g_levelKey);
+        return;
+    }
+    int start = 0;   // the same map, a rebuilt road map: paint again what is held
+    for (int k = 0; k <= g_roadN; k++) if (k == g_roadN || g_roadPts[k][0] > 1e8f) { if (k - start >= 2) roads_paint_trail(g_driveMask, g_roadPts + start, k - start); start = k + 1; }
+}
+static unsigned g_roadsSaved;
+static int roads_save_trail(float (*pts)[3], int n, const char *who)
+{
+    float len = 0; for (int k = 0; k + 1 < n; k++) len += dist2d(pts[k], pts[k + 1]);
+    if (n < 2 || !isfinite(len) || len < 15.0f) return 0;   // (a few metres of creeping is not a road)
+    char path[MAX_PATH]; map_path(path, sizeof path, "Thugbot_learned", ".roads");
+    FILE *f = fopen(path, "a");
+    if (!f) { H->log("drive: FAILED to save road to %s",path);return 0; }
+    int ok=1;
+    for (int k=0;k<n;k++) if (fprintf(f,"%.1f %.1f %.1f ",pts[k][0],pts[k][1],pts[k][2])<0) ok=0;
+    if (fprintf(f,"\n")<0) ok=0;
+    if (fclose(f)!=0) ok=0;
+    if (!ok) { H->log("drive: FAILED writing road to %s",path);return 0; }
+    if (g_driveMask) roads_paint_trail(g_driveMask, pts, n);
+    if (g_roadPts && g_roadN + n + 1 < MAX_ROAD_PTS) { memcpy(g_roadPts + g_roadN, pts, sizeof *pts * n); g_roadN += n; g_roadPts[g_roadN][0] = 1e9f; g_roadN++; }
+    g_roadsSaved++;
+    H->log("drive: learned a road %s drove - %.0f m, %d points (%u this session)", who, len, n, g_roadsSaved);
+    return 1;
+}
+#define MAX_TRACKS 24
+static struct { void *v; float pts[400][3]; int n; ULONGLONG lastAt, movedAt; int bot; char who[32]; } g_track[MAX_TRACKS];
+static void roads_track(void *v, const float *p, int isBot, const char *who, ULONGLONG t)
+{
+    int k = 0, freeK = -1;
+    for (; k < MAX_TRACKS; k++) { if (g_track[k].v == v) break; if (!g_track[k].v && freeK < 0) freeK = k; }
+    if (k == MAX_TRACKS) { if (freeK < 0) return; k = freeK; g_track[k].v = v; g_track[k].n = 0; g_track[k].bot = isBot; snprintf(g_track[k].who, sizeof g_track[k].who, "%s", who); }
+    g_track[k].lastAt = t;
+    int n = g_track[k].n;
+    if (n && dist2d(p, g_track[k].pts[n - 1]) > 60) { g_track[k].n = 0; n = 0; }   // (a jump: a respawn / a wrong read - start over)
+    if (n && dist2d(p, g_track[k].pts[n - 1]) < (isBot ? 4.0f : 1.0f)) {
+        if (!isBot && n>=2 && t-g_track[k].movedAt>=5000 && roads_save_trail(g_track[k].pts,n,g_track[k].who)) {
+            memcpy(g_track[k].pts[0],g_track[k].pts[n-1],12);g_track[k].n=1;
+        }
+        return;
+    }
+    if (n == 400) { if (!g_track[k].bot) roads_save_trail(g_track[k].pts, n, g_track[k].who); g_track[k].n = 0; n = 0; }
+    memcpy(g_track[k].pts[n], p, 12); g_track[k].n = n + 1;g_track[k].movedAt=t;
+    // Publish driven corridors during a drive instead of waiting for dismount/death.
+    if (!isBot && g_track[k].n>=16 && roads_save_trail(g_track[k].pts,g_track[k].n,g_track[k].who)) {
+        memcpy(g_track[k].pts[0],p,12);g_track[k].n=1;
+    }
+}
+// a track whose driver is gone (out, dead, the vehicle wrecked): players' are saved; bots' only when they arrived
+static void roads_track_end(void *v, int save)
+{
+    for (int k = 0; k < MAX_TRACKS; k++) if (g_track[k].v == v) { if (save) roads_save_trail(g_track[k].pts, g_track[k].n, g_track[k].who); g_track[k].v = NULL; g_track[k].n = 0; }
+}
+static void roads_track_expire(ULONGLONG t)
+{
+    for (int k = 0; k < MAX_TRACKS; k++) if (g_track[k].v && t - g_track[k].lastAt > 3000) roads_track_end(g_track[k].v, !g_track[k].bot);
+}
 static const unsigned char *drive_mask(void)
 {
     if (!g_nav || g_navBuilding) return NULL;
@@ -265,6 +434,7 @@ static const unsigned char *drive_mask(void)
         free(comp); free(queue);
     }
     g_driveMask = m; g_driveMaskGrid = g_nav; g_driveMaskSerial = g_nav->serial;
+    roads_load_paint();
     H->log("drive: road map for %s - %d of %d grid nodes wide enough for a car (in road areas of 300+ nodes)", g_levelKey, open, n);
     return m;
 }
@@ -286,7 +456,7 @@ static int road_point(float x, float y, float z, float radius, float *out)
             if (d >= best) continue;
             for (int l = 0; l < NAV_LAYERS; l++) {
                 int node = (z2 * g->w + x2) * NAV_LAYERS + l;
-                if (m[node] != 1 || fabsf(g->height[node] - y) > 6) continue;   // (class 1: 6 m clear - room to arrive)
+                if ((m[node] != 1 && m[node] != 6) || fabsf(g->height[node] - y) > 6) continue;   // (class 1: 6 m clear - room to arrive; 6: a road someone drove / the road scan)
                 best = d; out[0] = px; out[1] = g->height[node]; out[2] = pz; found = 1;
                 break;
             }
@@ -322,6 +492,147 @@ static float drive_yaw(Drive *d, void *v, ULONGLONG t)
     return wrap_pi(veh_yaw(v) + (d->motionN >= 8 ? d->matrixOff : 0));
 }
 
+// ---------------------------------------------------------------- saved vehicle routes (ported from FloodBots 2026-11-05)
+// Thugbot_learned\<map>.vroutes, "route ax ay az bx by bz n x y z ...": drawn in game (!rec, then !vsave) or in the 3D map
+// (read again when the file changes). A driver takes a route that passes near the car and near its flag, or a way over all
+// the routes as one network, and only without one the road map. the tester 2026-11-05: "make sure vehicles follow saved VEHICLE routes".
+#define NAV_MAX_OUT_DRIVE 256
+#define VNET_MAX 160
+typedef struct VRoute { float a[3], b[3]; int n; float pts[NAV_MAX_OUT_DRIVE][3]; } VRoute;
+static VRoute *g_vnet; static int g_vnetN, g_vgSerial = 1;
+static const NavGrid *g_vnetGrid; static FILETIME g_vnetStamp; static ULONGLONG g_vnetCheckAt;
+static void vnet_save(void)
+{
+    char path[MAX_PATH]; map_path(path, sizeof path, "Thugbot_learned", ".vroutes");
+    FILE *f = fopen(path, "w"); if (!f) return;
+    for (int k = 0; k < g_vnetN; k++) {
+        const VRoute *v = &g_vnet[k];
+        fprintf(f, "route %.1f %.1f %.1f %.1f %.1f %.1f %d", v->a[0], v->a[1], v->a[2], v->b[0], v->b[1], v->b[2], v->n);
+        for (int q = 0; q < v->n; q++) fprintf(f, " %.1f %.1f %.1f", v->pts[q][0], v->pts[q][1], v->pts[q][2]);
+        fputc('\n', f);
+    }
+    fclose(f);
+}
+static void vnet_load(void)
+{
+    g_vnetN = 0; g_vgSerial++;
+    char path[MAX_PATH]; map_path(path, sizeof path, "Thugbot_learned", ".vroutes");
+    FILE *f = fopen(path, "r"); if (!f) return;
+    static char line[65536];
+    while (g_vnetN < VNET_MAX && fgets(line, sizeof line, f)) {
+        VRoute *v = &g_vnet[g_vnetN]; int used = 0;
+        if (sscanf(line, "route %f %f %f %f %f %f %d%n", &v->a[0], &v->a[1], &v->a[2], &v->b[0], &v->b[1], &v->b[2], &v->n, &used) < 7 || v->n < 2 || v->n > NAV_MAX_OUT_DRIVE) continue;
+        char *c = line + used; int q = 0;
+        for (; q < v->n; q++) { int u; if (sscanf(c, "%f %f %f%n", &v->pts[q][0], &v->pts[q][1], &v->pts[q][2], &u) != 3) break; c += u; }
+        if (q == v->n) g_vnetN++;
+    }
+    fclose(f);
+    H->log("vnet: %d vehicle route(s) loaded for %s", g_vnetN, g_levelKey);
+}
+#define VG_MAX 6000
+static float (*g_vgP)[3]; static int g_vgN, g_vgBuiltFor = -1; static int *g_vgLinkStart, *g_vgLinks, g_vgLinkN;
+static void vnet_graph_build(void)
+{
+    if (g_vgBuiltFor == g_vgSerial && g_vgP) return;
+    g_vgBuiltFor = g_vgSerial; g_vgN = 0; g_vgLinkN = 0;
+    if (!g_vgP) { g_vgP = malloc(sizeof *g_vgP * VG_MAX); g_vgLinkStart = malloc(sizeof(int) * (VG_MAX + 1)); g_vgLinks = malloc(sizeof(int) * VG_MAX * 8); }
+    if (!g_vgP || !g_vgLinkStart || !g_vgLinks) return;
+    static int routeOf[VG_MAX];
+    for (int k = 0; k < g_vnetN; k++) for (int q = 0; q < g_vnet[k].n && g_vgN < VG_MAX; q++) { memcpy(g_vgP[g_vgN], g_vnet[k].pts[q], 12); routeOf[g_vgN] = k; g_vgN++; }
+    for (int a = 0; a < g_vgN; a++) {
+        g_vgLinkStart[a] = g_vgLinkN; int cnt = 0;
+        if (a > 0 && routeOf[a - 1] == routeOf[a]) { g_vgLinks[g_vgLinkN++] = a - 1; cnt++; }   // (along its route first)
+        if (a + 1 < g_vgN && routeOf[a + 1] == routeOf[a]) { g_vgLinks[g_vgLinkN++] = a + 1; cnt++; }
+        for (int b = 0; b < g_vgN && cnt < 8; b++)
+            if (routeOf[a] != routeOf[b] && dist2d(g_vgP[a], g_vgP[b]) < 15 && fabsf(g_vgP[a][1] - g_vgP[b][1]) < 4) { g_vgLinks[g_vgLinkN++] = b; cnt++; }
+    }
+    g_vgLinkStart[g_vgN] = g_vgLinkN;
+    H->log("vnet: route network of %d point(s), %d link(s)", g_vgN, g_vgLinkN);
+}
+static int vnet_graph_path(const float *vp, const float *target, float *path, int maxPts)
+{
+    vnet_graph_build();
+    if (g_vgN < 2) return 0;
+    // the way to each flag is worked out once (from the flag back over the whole network, 8 flags kept): every point then
+    // knows its next point towards it - a plan is a walk along those
+    static struct { float t[3]; int built, forN; float *d; int *next; } C[8]; static int cNext;
+    int c = 0;
+    while (c < 8 && !(C[c].built && C[c].forN == g_vgSerial && dist2d(C[c].t, target) < 2)) c++;
+    if (c == 8) {
+        c = cNext++ % 8;
+        if (!C[c].d) { C[c].d = malloc(sizeof(float) * VG_MAX); C[c].next = malloc(sizeof(int) * VG_MAX); }
+        if (!C[c].d || !C[c].next) return 0;
+        memcpy(C[c].t, target, 12); C[c].built = 1; C[c].forN = g_vgSerial;
+        static unsigned char done[VG_MAX];
+        for (int q = 0; q < g_vgN; q++) { C[c].d[q] = dist2d(g_vgP[q], target) < 35 ? 0 : 1e9f; C[c].next[q] = -1; done[q] = 0; }
+        for (;;) {   // (links run both ways along a route and across: the same Dijkstra outwards from the flag)
+            int u = -1; float bu = 1e9f;
+            for (int q = 0; q < g_vgN; q++) if (!done[q] && C[c].d[q] < bu) { bu = C[c].d[q]; u = q; }
+            if (u < 0) break;
+            done[u] = 1;
+            for (int l = g_vgLinkStart[u]; l < g_vgLinkStart[u + 1]; l++) { int w = g_vgLinks[l]; float nd = C[c].d[u] + dist2d(g_vgP[u], g_vgP[w]); if (nd < C[c].d[w]) { C[c].d[w] = nd; C[c].next[w] = u; } }
+        }
+    }
+    int s0 = -1; float bs = 1e9f;
+    for (int q = 0; q < g_vgN; q++) { float d = dist2d(vp, g_vgP[q]); if (d < 120 && fabsf(vp[1] - g_vgP[q][1]) < 8 && C[c].d[q] < 1e8f && d + C[c].d[q] < bs) { bs = d + C[c].d[q]; s0 = q; } }
+    if (s0 < 0) return 0;
+    static int chain[VG_MAX]; int cn = 0;
+    for (int q = s0; q >= 0 && cn < VG_MAX; q = C[c].next[q]) chain[cn++] = q;
+    int step = (cn + maxPts - 1) / maxPts; if (step < 1) step = 1;
+    int n = 0;
+    for (int k = 0; k < cn && n < maxPts; k += step) memcpy(&path[3 * n++], g_vgP[chain[k]], 12);
+    if (n >= 2) { static unsigned logged; if (logged++ < 30) H->log("vnet: a way over the route network - %d point(s), %.0f m", n, C[c].d[s0]); }
+    return n >= 2 ? n : 0;
+}
+static int g_vnetLead = 1;
+static int vnet_path(const float *vp, const float *target, float *path, int maxPts)
+{
+    // (the Fun-Bots roads imported for the Second Assault maps are road stretches, not flag-to-flag trips: any route that
+    // passes within 60 m of the vehicle and 35 m of the flag counts, driven from the one point to the other)
+    int bestK = -1, bestV = 0, bestT = 0; float bestCost = 1e9f;
+    for (int k = 0; k < g_vnetN; k++) {
+        const VRoute *v = &g_vnet[k];
+        int qv = -1, qt = -1; float dv = g_vnetLead ? 120.0f : 60.0f, dt = 35;   /* (60 m: drivers further off than that never found the tester's drawn routes - 2026-10-31) */
+        for (int q = 0; q < v->n; q++) {
+            float d = dist2d(vp, v->pts[q]); if (d < dv && fabsf(vp[1] - v->pts[q][1]) < 8) { dv = d; qv = q; }
+            float e = dist2d(target, v->pts[q]); if (e < dt) { dt = e; qt = q; }
+        }
+        if (qv < 0 || qt < 0 || abs(qt - qv) < 2) continue;
+        if (dv + dt < bestCost) { bestCost = dv + dt; bestK = k; bestV = qv; bestT = qt; }
+    }
+    if (bestK < 0) return vnet_graph_path(vp, target, path, maxPts);
+    const VRoute *v = &g_vnet[bestK]; int n = 0, step = bestT > bestV ? 1 : -1;
+    for (int q = bestV; n < maxPts; q += step) { memcpy(&path[3 * n++], v->pts[q], 12); if (q == bestT) break; }
+    return n >= 2 ? n : 0;
+}
+static int vnet_add_manual(const float (*pts)[3], int n)
+{
+    if (!g_vnet) g_vnet = calloc(VNET_MAX, sizeof *g_vnet);
+    if (!g_vnet || n < 2) return -1;
+    if (n > NAV_MAX_OUT_DRIVE) n = NAV_MAX_OUT_DRIVE;
+    const float *a = pts[0], *b = pts[n - 1];
+    int k = 0;
+    while (k < g_vnetN && !((dist2d(g_vnet[k].a, a) < 30 && dist2d(g_vnet[k].b, b) < 30) || (dist2d(g_vnet[k].a, b) < 30 && dist2d(g_vnet[k].b, a) < 30))) k++;
+    if (k == g_vnetN) { if (g_vnetN >= VNET_MAX) return -1; g_vnetN++; }
+    VRoute *v = &g_vnet[k];
+    memcpy(v->a, a, 12); memcpy(v->b, b, 12); v->n = n; memcpy(v->pts, pts, (size_t)n * 12);
+    vnet_save(); g_vgSerial++;
+    H->log("vnet: a vehicle route drawn in game - %d points, %.0f %.0f -> %.0f %.0f", n, a[0], a[2], b[0], b[2]);
+    return g_vnetN;
+}
+// This map's routes: read when the level changes, and again when the file changes (a save in the 3D map, mid-round).
+static void vnet_sync(ULONGLONG t)
+{
+    if (!g_nav || g_navBuilding) return;
+    if (!g_vnet) { g_vnet = calloc(VNET_MAX, sizeof *g_vnet); if (!g_vnet) return; }
+    int fresh = g_vnetGrid != g_nav;
+    if (!fresh && t < g_vnetCheckAt) return;
+    g_vnetCheckAt = t + 5000;
+    char path[MAX_PATH]; map_path(path, sizeof path, "Thugbot_learned", ".vroutes");
+    WIN32_FILE_ATTRIBUTE_DATA fa; FILETIME stamp = { 0, 0 };
+    if (GetFileAttributesExA(path, GetFileExInfoStandard, &fa)) stamp = fa.ftLastWriteTime;
+    if (fresh || CompareFileTime(&stamp, &g_vnetStamp)) { g_vnetGrid = g_nav; g_vnetStamp = stamp; vnet_load(); }
+}
 static void vehicle_exit(Bot *b, ULONGLONG t, Drive *d, const char *why)
 {
     if (!d->exitFrom) {
@@ -383,8 +694,20 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
         memcpy(d->roadGoal, to, 12);
         nav_set_path_mask(mask); nav_set_vehicle_width(1.3f);
         nav_set_path_owner(i);
-        int n = nav_find_path(g_nav, ray_cast, from[0], from[1], from[2], to[0], to[1], to[2], b->path, BRAIN_PATH_MAX);
-        int deferred = !n && nav_last_deferred();
+        vnet_sync(t);
+        int vn = vnet_path(vp, b->target, b->path, BRAIN_PATH_MAX), vnDeferred = 0;   // a saved vehicle route first
+        if (vn && g_vnetLead && dist2d(vp, b->path) > 20) {   // it starts away from the car: by road to its start, not straight at it through the walls
+            static float lead[BRAIN_PATH_MAX * 3];
+            int ln = nav_find_path(g_nav, ray_cast, from[0], from[1], from[2], b->path[0], b->path[1], b->path[2], lead, BRAIN_PATH_MAX);
+            if (!ln && nav_last_deferred()) { vn = 0; vnDeferred = 1; }   // (still planning: asked again next time)
+            else if (ln >= 1) {
+                int keep = vn + ln > BRAIN_PATH_MAX ? BRAIN_PATH_MAX - ln : vn;
+                memmove(b->path + ln * 3, b->path, (size_t)keep * 12); memcpy(b->path, lead, (size_t)ln * 12); vn = ln + keep;
+            }
+        }
+        if (vn) { memcpy(d->roadGoal, &b->path[(vn - 1) * 3], 12); static unsigned vl; if (vl++ < 20) H->log("drive: %s takes a saved vehicle route to its flag (%d points)", (char *)b->player + OFF_PLAYER_NAME, vn); }
+        int n = vnDeferred ? 0 : vn ? vn : nav_find_path(g_nav, ray_cast, from[0], from[1], from[2], to[0], to[1], to[2], b->path, BRAIN_PATH_MAX);
+        int deferred = vnDeferred || (!n && nav_last_deferred());
         nav_set_path_owner(-1); nav_set_path_mask(NULL);
         if (!n && !deferred) { static unsigned logged; if (logged++ < 20) H->log("drive: %s no road from %.0f %.0f to %.0f %.0f (%s)", (char *)b->player + OFF_PLAYER_NAME, from[0], from[2], to[0], to[2], nav_last_error()); }
         if (n) {   // (the car moved on while the route was planned: pick it up at the nearest of its first points)
@@ -446,6 +769,24 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
     }
     b->turn = fmaxf(-1, fminf(1, -err * 2.0f));
     b->fwd = 1.0f;   // full throttle: partial throttle (0.6 - 0.75) left most cars standing still (only "drivetest" at 1.0 moved them)
+    // Ground check 6 and 10 m ahead, every 150 ms (from FloodBots; the tester 2026-11-05: "drove next to the bridge into the water").
+    // The planner never routes over water, but a car drives straight from point to point and can leave a bridge between
+    // them. A ray down from 2 m up must meet ground within reach of the car's level - water (rays go through it) or a
+    // drop-off reads as none: back up turning away, block that way in the grid, plan again.
+    if (t >= d->edgeAt) {
+        d->edgeAt = t + 150;
+        float yw = drive_yaw(d, v, t); int edge = 0;
+        for (int r = 6; r <= 10 && !edge; r += 4) {
+            float a[3] = { vp[0] + sinf(yw) * r, vp[1] + 2.0f, vp[2] + cosf(yw) * r }, e[3] = { a[0], vp[1] - 1.0f - 0.45f * r, a[2] }, h[3];   // (a 29 degree slope down is still road)
+            if (!ray_cast(a, e, h, NULL)) edge = r;
+        }
+        if (edge) {
+            d->reverseUntil = t + 1500; d->reverseTurn = d->reverseTurn > 0 ? -1.0f : 1.0f; b->npts = 0; b->planAt = 0;
+            if (g_nav && !g_navBuilding) nav_block_towards(g_nav, vp[0], vp[1], vp[2], vp[0] + sinf(yw) * 10, vp[2] + cosf(yw) * 10);
+            static unsigned el; if (el++ < 40) H->log("drive: %s - no ground %d m ahead at %.0f %.0f (water / drop): backs off", (char *)b->player + OFF_PLAYER_NAME, edge, vp[0], vp[2]);
+            b->fwd = -1; b->turn = d->reverseTurn; return 1;
+        }
+    }
     // Look ahead (every 150 ms): three rays at bumper height from the front of the car - straight on and 20 degrees
     // either side, 14 m. Something straight ahead: steer for the side that's clearer and ease off; boxed in within 5 m:
     // back up (reversing steers the other way).
@@ -550,6 +891,11 @@ static void vehicles_track(void)
         g_knownVeh[k].occupied = 1;
         int seat = -1; player_vehicle(g_players[j], &seat);
         if (seat == 0 && !is_bot_player(g_players[j])) g_knownVeh[k].humanDriverTeam = FIELD(g_players[j], OFF_PLAYER_TEAM, int);
+        if (seat == 0) {   // driven roads: follow the driver (players always; bots' tracks are kept only if they arrive)
+            const char *nm = g_knownVeh[k].name;
+            const float *vp1 = !IsBadReadPtr(v, 0x300) ? veh_pos(v) : NULL;
+            if (vp1 && !is_boat_name(nm) && !name_is_air(nm)) roads_track(v, vp1, is_bot_player(g_players[j]), (const char *)g_players[j] + OFF_PLAYER_NAME, t);
+        }
     }
     // the memory scan's finds: those with a world transform on this map are vehicles nobody has used yet
     if (InterlockedExchange(&g_vehScanDone, 0)) {
@@ -568,6 +914,35 @@ static void vehicles_track(void)
             added++;
         }
         H->log("vehicles: memory scan found %d object(s) of a vehicle class, %d new vehicle(s) on the map - %d known", (int)g_foundVehN, added, g_knownVehN);
+    }
+    roads_track_expire(t);
+    {   // seeds without anyone driving: ground vehicles spawn on roads / paved pads - the ground under every parked car, quad
+        // and tank (each once; its spot and 4 points 3 m round it) counts as road surface
+        static void *seeded[256]; static unsigned ns; static const void *seedGrid;
+        if (seedGrid != g_nav) { seedGrid = g_nav; ns = 0; }
+        for (int k = 0; k < g_knownVehN; k++) {
+            KnownVeh *kv = &g_knownVeh[k];
+            const char *nm = kv->name;
+            if (kv->occupied || !nm[0] || !strcmp(nm, "vehicle") || is_boat_name(nm) || name_is_air(nm)) continue;
+            int done = 0; for (unsigned q = 0; q < ns && q < 256; q++) if (seeded[q] == kv->v) done = 1;
+            if (done || ns >= 256) continue;
+            seeded[ns++] = kv->v;
+            { static unsigned sl; if (sl++ < 10) H->log("drive: road seed from %s at %.0f %.0f (%u samples so far)", nm, kv->pos[0], kv->pos[2], g_rmTotal); }
+            for (int d = 1; d < 5; d++) { float q2[3] = { kv->pos[0] + (d == 1 ? 4.5f : d == 2 ? -4.5f : 0), kv->pos[1], kv->pos[2] + (d == 3 ? 4.5f : d == 4 ? -4.5f : 0) }; roadmat_note(q2); }   /* (4.5 m out: the ray at the vehicle itself hits its body) */
+        }
+    }
+    if (g_roadRescan && g_rmSweepDone) { g_rmSweep = 0; g_rmSweepDone = 0; g_driveMaskSerial = 0; }   /* (a fresh road map, then the scan) */
+    { static unsigned sweepSerial; if (g_nav && sweepSerial != g_nav->serial) { sweepSerial = g_nav->serial; g_rmSweep = 0; g_rmSweepDone = 0; } if (g_rmTotal >= 20 && !g_rmSweepDone && drive_mask()) roadmat_sweep(); }   /* (builds the road map itself if no driver has yet) */
+    {   // vehicle health watch: [+0x218]+0x30..0x44 of every known vehicle - logged when one changes (finding current health)
+        static void *hv[64]; static float hvv[64][6]; static unsigned hlog;
+        for (int k = 0; k < g_knownVehN && k < 64; k++) {
+            float cur[6]; int ok = 1;
+            for (int s2 = 0; s2 < 6; s2++) if (!hp_at(g_knownVeh[k].v, 0x218, 0x30 + s2 * 4, &cur[s2])) ok = 0;
+            if (!ok) continue;
+            if (hv[k] == g_knownVeh[k].v && memcmp(hvv[k], cur, sizeof cur) && hlog++ < 60)
+                H->log("vehhp: %s [+0x218] +30..44: %.1f %.1f %.1f %.1f %.1f %.1f (was %.1f %.1f %.1f %.1f %.1f %.1f)", g_knownVeh[k].name, cur[0], cur[1], cur[2], cur[3], cur[4], cur[5], hvv[k][0], hvv[k][1], hvv[k][2], hvv[k][3], hvv[k][4], hvv[k][5]);
+            hv[k] = g_knownVeh[k].v; memcpy(hvv[k], cur, sizeof cur);
+        }
     }
     vehicle_scan_start(0);
     for (int k = 0; k < g_knownVehN; k++) {   // where each one is now (gone - destroyed, freed - when it stops reading as one)
@@ -611,6 +986,7 @@ static int vehicle_to_take(int i, const float *pos, const float *target, float *
 {
     ULONGLONG t = now_ms();
     if (!g_set.vehicles) return -1;
+    vnet_sync(t);
     int team = FIELD(H->bots[i], OFF_PLAYER_TEAM, int);
     for (int k = 0; k < g_knownVehN; k++) {   // a teammate (human) driving, stopped: hop in
         KnownVeh *kv = &g_knownVeh[k];
@@ -630,6 +1006,7 @@ static int vehicle_to_take(int i, const float *pos, const float *target, float *
         if (!vehicle_drivable_name(kv->name)) continue;
         if (g_bot[i].noVeh == kv->v && t < g_bot[i].noVehUntil) continue;
         if (dist2d(kv->pos, target) > dist2d(pos, target)) continue;   // not one that's further from the flag
+        if (g_vnetN > 0) { static float tmp[BRAIN_PATH_MAX * 3]; if (!vnet_path(kv->pos, target, tmp, BRAIN_PATH_MAX)) continue; }   // (this map has saved vehicle routes: only trips they cover)
         float d = dist2d(pos, kv->pos);
         if (d < bd) { bd = d; best = k; }
     }
@@ -644,4 +1021,18 @@ static void drive_dump(void)
     for (int i = 0; i < H->botCount; i++) { int seat; if (player_vehicle(H->bots[i], &seat)) { if (seat == 0) drivers++; else passengers++; } }
     H->log("drive: %d bot(s) driving, %d riding; since start %u drive(s), %u reached a flag, %u gave up; %u car(s) taken on foot", drivers, passengers, g_drives, g_driveArrivals, g_driveGiveUps, g_vehTaken);
     for (int k = 0; k < g_knownVehN; k++) H->log("drive: known %s at %.0f %.0f %.0f%s", g_knownVeh[k].name, g_knownVeh[k].pos[0], g_knownVeh[k].pos[1], g_knownVeh[k].pos[2], g_knownVeh[k].occupied ? " (in use)" : "");
+}
+
+// "vnetsnap": test - the road route a bot is driving right now, saved as a vehicle route.
+static void vnet_snap(void)
+{
+    for (int i = 0; i < H->botCount; i++) {
+        Bot *b = &g_bot[i];
+        if (!b->inVehicle || b->npts < 4) continue;
+        float tmp[NAV_MAX_OUT_DRIVE][3]; int n = b->npts < NAV_MAX_OUT_DRIVE - 1 ? b->npts : NAV_MAX_OUT_DRIVE - 1;
+        memcpy(tmp, b->path, (size_t)n * 12); memcpy(tmp[n++], b->target, 12);   // (ending at the flag, as a drawn route does)
+        H->log("vnetsnap: %s's route saved: %d", (char *)b->player + OFF_PLAYER_NAME, vnet_add_manual((const float (*)[3])tmp, n));
+        return;
+    }
+    H->log("vnetsnap: nobody driving a route");
 }

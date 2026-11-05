@@ -250,7 +250,7 @@ static void request_advance(NavRequest *q,double deadline)
             }
             if((d&1) && step_node(g,cur,(d+7)&7)<0 && step_node(g,cur,(d+1)&7)<0)continue;
             float climb=g->height[nb]-g->height[cur],step=((d&1)?1.4142f:1.0f)*g->cell;
-            static const float driveCost[8]={1.0f,0.5f,1.0f,1.6f,2.5f,12.0f,1.0f,1.0f};
+            static const float driveCost[8]={1.0f,0.5f,1.0f,1.6f,2.5f,12.0f,0.2f,1.0f};   /* 6: driven / scanned road */
             float mul=q->mask?driveCost[q->mask[nb]&7]:(g->flags[nb]&NAV_WATER)?WATER_COST_MUL:
                 roads && roads[nb]==1?0.6f:roads && roads[nb]==2?0.85f:1.0f;
             if(!q->mask && trees && trees[nb]<=TREE_NEAR_DM)mul*=6.0f;

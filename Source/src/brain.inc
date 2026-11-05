@@ -58,7 +58,7 @@ typedef struct Bot {
     float lastPos[3];
     unsigned seed;
     int inVehicle;                  // seated in a vehicle this frame (reverse / brake input allowed)
-    ULONGLONG poolSince; float poolRim[3];   // in a pool, heading for the rim to climb out
+    ULONGLONG poolSince, poolCool, poolOutAt; int poolWet, poolLoops; float poolRim[3], poolBest, poolOutPos[3], poolOutRim[3];   // in a pool, heading for the rim to climb out
     float roll, yawIn, throttleIn;  // extra analog inputs through the input hook (EIARoll, EIAYaw): aircraft
     // explore (no real progress for 12 s): walking an open direction picked by rays
     ULONGLONG progAt, exploreUntil, exploreBlockedAt; float progPos[3], exploreDir, exploreFrom[3], tried[3]; int exploreN, triedN;

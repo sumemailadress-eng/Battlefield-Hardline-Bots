@@ -52,6 +52,14 @@
 #define OFF_DMG_GIVER_INFO       0xb0      // DamageGiverInfo*: +0 -> weak ref -> (ServerPlayer + 8)
 #define OFF_DMG_FLAGS            0xbc      // bit 0: client-confirmed, bit 1: skips the check
 
+// ---- Vaulting (fb::ServerVaultComponent; same code as BF4's, found through "Vault.NoAnimatableInputTicks") ----
+#define RVA_VAULT_PUBLISH       0x52ce20  // publishes the vault state, every tick (BF4 0x457ce0)
+#define RVA_VAULT_PUBLISH_CALL  0x4e0e15  // the E8 call to it in RVA 0x4e0da0
+#define RVA_VAULT_NET           0x52d1c0  // networked vault update (comp, input, net state) (BF4 0x457f30)
+#define RVA_VAULT_NET_CALL1     0x4e0ee7  // in RVA 0x4e0ed0
+#define RVA_VAULT_NET_CALL2     0x379231  // in RVA 0x3791c0
+#define RVA_CHAR_SET_VELOCITY   0x123b180 // CharacterPhysicsEntity::setLinearVelocity(entity, Vec4*) ("Trying to set a nonFinite velocity") (BF4 0xd42940); the entity is the vault part's virtual +0x50
+
 #define OFF_PPM_PLAYERS_BEGIN   0x18      // PseudoPlayer** vector [begin, end)
 #define OFF_PPM_PLAYERS_END     0x20
 

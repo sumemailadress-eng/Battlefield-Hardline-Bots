@@ -4,6 +4,7 @@
 //   !undo      remove the last point          !clear   start over
 //   !save      save the points as a route bots use (with the routes they learned from players, and - when an end is
 //              near a flag - as a saved route to that flag)
+//   !vsave     save the points as a VEHICLE route (Thugbot_learned\\<map>.vroutes): drivers follow it (drive.inc)
 //   !delete    delete the route nearest to you (one you saved or one learned from players)
 //   !routes    how many routes this map has
 // Chat reaches the server as RCON events; Thugbot-Chat.ps1 (started with the server) passes "!" lines here as
@@ -120,6 +121,9 @@ static void editor_command(const char *who, const char *text)
         if (g_ed.n) g_ed.n--; say_to(who, "Thugbot: %d point(s) left", g_ed.n);
     } else if (!strncmp(text, "!clear", 6)) {
         g_ed.n = 0; g_ed.recording = 0; say_to(who, "Thugbot: cleared");
+    } else if (!strncmp(text, "!vsave", 6)) {
+        if (g_ed.n < 2) say_to(who, "Thugbot: need at least 2 points (you have %d)", g_ed.n);
+        else { int k = vnet_add_manual((const float (*)[3])g_ed.pts, g_ed.n); if (k >= 0) { say_to(who, "Thugbot: vehicle route saved (%d points) - %d vehicle route(s) on this map", g_ed.n, k); g_ed.n = 0; g_ed.recording = 0; } else say_to(who, "Thugbot: could not save the vehicle route"); }
     } else if (!strncmp(text, "!save", 5)) editor_save(who);
     else if (!strncmp(text, "!delete", 7)) { if (have) editor_delete(who, g); else say_to(who, "Thugbot: can't find where you are"); }
     else if (!strncmp(text, "!lift", 5)) {   // stand in an elevator at the bottom: !lift; ride up, step out: !lift
@@ -135,7 +139,7 @@ static void editor_command(const char *who, const char *text)
         say_to(who, "Thugbot: everyone out of your %s", vehicle_name(v));
     }
     else if (!strncmp(text, "!routes", 7)) say_to(who, "Thugbot: %d saved route(s), %d learned from players; editing %d point(s)", g_routeN, g_learn ? g_learn->nRoutes : 0, g_ed.n);
-    else say_to(who, "Thugbot: !wp !rec !stop !undo !clear !save !delete !routes !lift !out");
+    else say_to(who, "Thugbot: !wp !rec !stop !undo !clear !save !vsave !delete !routes !lift !out");
 }
 
 static void editor_tick(void)
