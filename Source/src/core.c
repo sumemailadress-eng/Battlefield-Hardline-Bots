@@ -569,6 +569,23 @@ static void h_ppmUpdate(void *mgr, int a2, float dt)
         brain_tick();
         QueryPerformanceCounter(&c);
         perf_note((double)(c.QuadPart - a.QuadPart), g_raysTotal - rays0);
+        {   // (0.3.1) what the bot code and the server's tick rate did this last minute; over 10 ms of bot code a frame sustained: shed thinking
+            static double ema, minSum, minMax, gapMax; static unsigned minFrames, minRays, minShed; static LONGLONG lastA; static ULONGLONG minAt;
+            double ms = (double)(c.QuadPart - a.QuadPart) / g_perfFreq, gap = lastA ? (double)(a.QuadPart - lastA) / g_perfFreq : 0;
+            lastA = a.QuadPart;
+            ema = ema * 0.98 + ms * 0.02;
+            int was = g_shed;
+            if (!g_shedOn) g_shed = 0; else if (ema > 10) g_shed = 1; else if (ema < 3) g_shed = 0;
+            if (g_shed != was) { static unsigned sl; if (sl++ < 40) H->log("perfmin: bot code %.1f ms a frame - %s", ema, g_shed ? "overloaded, bots think every other frame" : "back to every frame"); }
+            minSum += ms; if (ms > minMax) minMax = ms; if (gap > gapMax) gapMax = gap; minFrames++; minRays += g_raysTotal - rays0; minShed += g_shed != 0;
+            ULONGLONG nowT = GetTickCount64();
+            if (!minAt) minAt = nowT;
+            if (nowT - minAt >= 60000) {
+                H->log("perfmin: %.0f ticks a second, bot code %.2f ms a frame (worst %.0f), longest gap between ticks %.0f ms, %u rays a frame, shedding %u%% of the time; %d bots",
+                       minFrames * 1000.0 / (double)(nowT - minAt), minSum / minFrames, minMax, gapMax, minRays / minFrames, minShed * 100 / minFrames, H->botCount);
+                minSum = minMax = gapMax = 0; minFrames = minRays = minShed = 0; minAt = nowT;
+            }
+        }
     }
     yaw_test_tick();
     if (world) vault_tick();
@@ -714,6 +731,7 @@ __declspec(dllexport) void thugbot_command(char *line)
     else if (!strncmp(line, "reprobe ", 8)) { if (sscanf(line + 8, "%f %f %f %f %f", &g_rpArea[0], &g_rpArea[1], &g_rpArea[2], &g_rpArea[3], &g_rpArea[4]) == 5) InterlockedExchange(&g_rpDo, 1); }
     else if (!strncmp(line, "routepoints ", 12)) { if (sscanf(line + 12, "%f %f %f %f %f %f", &g_rtFrom[0], &g_rtFrom[1], &g_rtFrom[2], &g_rtTo[0], &g_rtTo[1], &g_rtTo[2]) == 6) InterlockedExchange(&g_rtPoints, 1); }
     else if (!strncmp(line, "routetest ", 10)) InterlockedExchange(&g_routeTestBot, atoi(line + 10));
+    else if (!strncmp(line, "shed ", 5)) { g_shedOn = atoi(line + 5) != 0; H->log("perfmin: shedding %s", g_shedOn ? "allowed" : "off"); }
     else if (!strcmp(line, "perf")) InterlockedExchange(&g_perfDump, 1);
     else if (!strcmp(line, "groundprobe")) InterlockedExchange(&g_groundProbe, 1);
     else if (!strcmp(line, "vehname")) InterlockedExchange(&g_vehName, 1);

@@ -1,6 +1,21 @@
 ThugBot patch notes
 ===================
 
+V0.3.1 hotfix (2026-11-07)
+--------------------------
+Reduces server load after lag was reported on V0.3. This has not been confirmed to fix the lag in play yet.
+
+In testing, ThugBot's code took about 2 ms a frame until the game client started on the same PC, then 15 - 20 ms with the
+server down to 20 - 30 ticks a second. The CPU was at 28% of its top speed and memory was nearly full, so the PC itself
+may be a large part of it. Running the server and the game on one PC needs a good power mode and free memory.
+
+- The map page (Thugbot_report) is written every 10 minutes instead of every minute.
+- Helicopters and gunners do their ray checks a few times a second instead of every frame.
+- Reading a vehicle's position is cheaper.
+- When bot code stays over 10 ms a frame, each bot thinks every other frame until it recovers. Bots may turn and aim more
+  slowly during that. The "shed 0" command turns this off.
+- The log prints a "perfmin:" timing line every minute and a "save:" line when saving takes over 30 ms.
+
 V0.3 early release (2026-11-07)
 -------------------------------
 Vehicles are still NOT officially supported, and bots still stay on foot by default (Vehicles=0). To try helicopters and

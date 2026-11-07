@@ -74,7 +74,9 @@ static const float *vehicle_engine_xf(void *v)
         }
         return NULL;
     }
-    {
+    static void *okSeen[512]; unsigned okSlot = (unsigned)(((uintptr_t)v >> 4) % 512);   // (lag fix 0.3.1: only a vehicle not seen lately does the name lookup)
+    if (okSeen[okSlot] != v) {
+        okSeen[okSlot] = v;
         static char okN_[32][40]; static int okN; const char *nm = vehicle_name(v); int k = 0;
         while (k < okN && strcmp(okN_[k], nm)) k++;
         if (k == okN && okN < 32) {

@@ -1682,6 +1682,7 @@ static void route_test_tick(void)
            nav_node_clearance(g_nav, p[0], p[1], p[2]));
 }
 static void perf_part(int k, LARGE_INTEGER *since);   // core.c
+static int g_shed, g_shedOn = 1;   // overloaded (core.c): each bot thinks every other frame ("shed 0": never)
 static void brain_tick(void)
 {
     LARGE_INTEGER pt; QueryPerformanceCounter(&pt);
@@ -1714,6 +1715,9 @@ static void brain_tick(void)
     for (int i = 0; i < H->botCount; i++) {
         // (Every bot thinks every frame: thinking every other frame with 40+ bots made turning overshoot - the turn input
         // is a rate, held for two frames it turned twice as far - and movement jittered. the tester 2026-10-23.)
+        // (0.3.1) Overloaded: every other frame per bot. Turn input is a rate, so a walking bot's turn and pitch stop on the frame it skips (it would
+        // overshoot otherwise); a bot in a vehicle holds its inputs.
+        if (g_shed && ((i + H->frame) & 1)) { Bot *sb = &g_bot[i]; if (!sb->inVehicle) { sb->turn = 0; sb->pitch = 0; } continue; }
         bot_think(i);
         // (spawn vehicles: drive.inc drives them now - spawn_vehicle_exit() no longer runs)
         jumptest_bot(i, &g_bot[i]);
@@ -1744,7 +1748,17 @@ static void brain_tick(void)
     lifts_load(); lifts_link(); oneway_fix(); lifts_watch_humans();
     jumptest_frame();
     drivetest_frame();
-    if (now_ms() - g_learnSavedAt > 60000 || InterlockedExchange(&g_reportNow, 0)) { learn_save(); routes_save(); report_write(); g_learnSavedAt = now_ms(); }
+    // Saves every minute; the map page only every 10 minutes or on "report": together they stall a frame each minute (FloodBots: players rubber-banded)
+    {
+        int rep = InterlockedExchange(&g_reportNow, 0);
+        static ULONGLONG reportAt;
+        if (now_ms() - g_learnSavedAt > 60000 || rep) {
+            ULONGLONG t0 = now_ms(); learn_save(); ULONGLONG t1 = now_ms(); routes_save(); ULONGLONG t2 = now_ms(), t3 = t2;
+            if (rep || !reportAt || t0 - reportAt > 600000) { report_write(); reportAt = now_ms(); t3 = now_ms(); }
+            if (t3 - t0 > 30) H->log("save: learn %u ms, routes %u ms, map page %u ms", (unsigned)(t1 - t0), (unsigned)(t2 - t1), (unsigned)(t3 - t2));
+            g_learnSavedAt = now_ms();
+        }
+    }
     perf_part(5, &pt);
 }
 

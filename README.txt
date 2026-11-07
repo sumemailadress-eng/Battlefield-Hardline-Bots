@@ -1,6 +1,6 @@
 ThugBot - player bots for a Battlefield Hardline server (BF-Portable)
 =====================================================================
-Version 0.3, early release. What changed: PATCHNOTES.txt. Vehicles are not officially supported yet.
+Version 0.3.1, early release. What changed: PATCHNOTES.txt. Vehicles are not officially supported yet.
 
 ThugBot fills a Battlefield Hardline dedicated server with bots that play like players: they capture and
 defend flags, fight with cover, crouch, vault, open doors, knife glass, throw grenades, use grenade

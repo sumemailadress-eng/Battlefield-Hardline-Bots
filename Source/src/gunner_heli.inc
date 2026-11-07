@@ -23,6 +23,7 @@ typedef struct Gunner {
     int nc, po[GUN_CANDS], off[GUN_CANDS]; float yaw0[GUN_CANDS], fy0[GUN_CANDS], body0;
     int yawM, pitchM; float yawSign, pitchSign; int flip;
     float estYaw; ULONGLONG estAt; int estOk;   // blind aiming (no gun matrix found): the gun's heading kept by dead reckoning
+    ULONGLONG scanAt; int scanFound; float scanAim[3];   // (lag fix 0.3.1)
     int pitchBlind; float estPitch, lastPitch; ULONGLONG pitchAt;   // no barrel matrix found: its elevation kept by dead reckoning
 } Gunner;
 static Gunner g_gun[MAX_BOTS];
@@ -108,6 +109,7 @@ static int gunner_think(int i, Bot *b, void *v, int seat, int team)
         if (!g->estOk) { g->estYaw = veh_yaw(v); g->estAt = t; g->estOk = 1; }
         float dt = (t - g->estAt) / 1000.0f; g->estAt = t; if (dt > 0.2f) dt = 0.2f;
         float eye0[3] = { vp[0], vp[1] + 1.5f, vp[2] }, best0 = name_is_air(vehicle_name(v)) ? 400.0f : 250.0f, aim0[3]; int found0 = 0;
+        if (t >= g->scanAt) { g->scanAt = t + 250;
         for (int j = 0; j < g_playerCount; j++) {
             void *pl = g_players[j]; int pt = FIELD(pl, OFF_PLAYER_TEAM, int);
             if (!pt || pt == team) continue;
@@ -122,6 +124,7 @@ static int gunner_think(int i, Bot *b, void *v, int seat, int team)
             if (!gun_line_ok(s0, q)) continue;
             best0 = d + heavy0; memcpy(aim0, q, 12); found0 = 1;
         }
+        g->scanFound = found0; if (found0) memcpy(g->scanAim, aim0, 12); } else { found0 = g->scanFound; if (found0) memcpy(aim0, g->scanAim, 12); }
         if (!found0) return 1;
         float err0 = wrap_pi(atan2f(aim0[0] - eye0[0], aim0[2] - eye0[2]) - g->estYaw);
         float u = fmaxf(-1, fminf(1, -err0 * 2));
@@ -148,6 +151,7 @@ static int gunner_think(int i, Bot *b, void *v, int seat, int team)
     if (g->flip) { fx = -fx; fz = -fz; fy = -fy; }
     // the nearest enemy in sight (soldiers; and the vehicles enemies sit in)
     float best = name_is_air(vehicle_name(v)) ? 400 : 250, aim[3]; int found = 0;
+    if (t >= g->scanAt) { g->scanAt = t + 250;
     for (int j = 0; j < g_playerCount; j++) {
         void *pl = g_players[j];
         int pt = FIELD(pl, OFF_PLAYER_TEAM, int);
@@ -165,6 +169,7 @@ static int gunner_think(int i, Bot *b, void *v, int seat, int team)
         if (!gun_line_ok(s0, q)) continue;
         best = d + heavy; memcpy(aim, q, 12); found = 1;
     }
+    g->scanFound = found; if (found) memcpy(g->scanAim, aim, 12); } else { found = g->scanFound; if (found) memcpy(aim, g->scanAim, 12); }
     if (!found) { g->fireSince = 0; return 1; }
     float want = atan2f(aim[0] - eye[0], aim[2] - eye[2]), have = atan2f(fx, fz), err = wrap_pi(want - have);
     float wantP = atan2f(aim[1] - eye[1], dist2d(aim, eye)), haveP = asinf(fmaxf(-1, fminf(1, fy))), perr;

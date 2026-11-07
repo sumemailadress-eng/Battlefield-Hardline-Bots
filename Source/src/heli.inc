@@ -127,7 +127,7 @@ static void heli_deepscan(void *v, const float *ground, float agl)
 // Attack helicopter pilots fire the nose guns at an enemy within 150 m, ahead and in line (and turn to one in 80 m).
 #define HELI_CRUISE_UP 35.0f
 static int g_heliFlip = 0;   // "heliflip 1": each axis may correct its sign once. Off: a bad reading flipped yaw 1 s into a flight and it spun in (2026-11-06)
-typedef struct HeliCtl { float rateYaw, yawRate; ULONGLONG rateAt; float sign[3], acc[3], prev[3]; ULONGLONG winAt, lastAt; float lastY, vy, lastX, lastZ, vx, vz; int flips[3]; } HeliCtl;
+typedef struct HeliCtl { ULONGLONG gndAt, obsAt, scanAt; int gndHit, obsBlocked; float gndY, obsTop; void *tgt; float rateYaw, yawRate; ULONGLONG rateAt; float sign[3], acc[3], prev[3]; ULONGLONG winAt, lastAt; float lastY, vy, lastX, lastZ, vx, vz; int flips[3]; } HeliCtl;
 static HeliCtl g_hctl[MAX_BOTS];
 static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
 {
@@ -155,10 +155,13 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
     const char *category = vehicle_name(v);
     int attack = strstr(category, "ATTACK") || strstr(category, "attack") || strstr(category, "scout") || strstr(category,"SCOUT"), firing = 0;
     float ground = p[1] - 200;
-    { float a[3] = { p[0], p[1] - 2, p[2] }, e[3] = { p[0], p[1] - 300, p[2] }, hh[3]; if (ray_cast(a, e, hh, NULL)) ground = hh[1]; }
+    if (t >= c->gndAt) { c->gndAt = t + 150; c->gndHit = 0; float a[3] = { p[0], p[1] - 2, p[2] }, e[3] = { p[0], p[1] - 300, p[2] }, hh[3]; if (ray_cast(a, e, hh, NULL)) { c->gndHit = 1; c->gndY = hh[1]; } }   // (lag fix 0.3.1: rays a few times a second, not every frame)
+    if (c->gndHit) ground = c->gndY;
     float want = fmaxf(aim[1] + HELI_CRUISE_UP, ground + 25);
     float dist = dist2d(p, aim);
     if (attack) {
+        // (lag fix 0.3.1) who to attack is chosen 4 times a second, with its line-of-sight rays; where it is, every frame
+        if (t >= c->scanAt) { c->scanAt = t + 250; c->tgt = NULL;
         float best = 1e9f;
         for (int j = 0; j < g_playerCount; j++) {
             void *pl = g_players[j];
@@ -175,7 +178,16 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
             if (d < 0.5f || d > range || score >= best) continue;
             float s0[3] = { p[0] + (q[0] - p[0]) / d * 4, p[1] + (q[1] - p[1]) / d * 4, p[2] + (q[2] - p[2]) / d * 4 };
             if (!clear_line(s0, q)) continue;
-            best = score; memcpy(aim, q, 12); firing = 1;
+            best = score; c->tgt = pl;
+        }
+        }
+        if (c->tgt) {
+            int there = 0; for (int j = 0; j < g_playerCount && !there; j++) there = g_players[j] == c->tgt;
+            if (there) {
+                void *ev = player_vehicle(c->tgt, NULL); const float *qq = NULL; float dy = 0;
+                if (ev) qq = veh_pos(ev); else { void *s = bot_soldier(c->tgt); if (s) { qq = soldier_pos(s); dy = 1; } }
+                if (qq) { memcpy(aim, qq, 12); aim[1] += dy; firing = 1; }
+            } else c->tgt = NULL;
         }
         if (firing) { dist = dist2d(p, aim); want = fmaxf(fminf(want, aim[1] + 25), ground + 15); }
     }
@@ -188,8 +200,9 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
         // (the tester 2026-10-30: "choppers hit buildings instead of navigating between buildings" - only the nose line was
         // looked along; a helicopter sliding sideways or turning met the building beside it) also 25 degrees either side
         // of the nose and along the way it is actually moving
-        float top = -1e9f, sp = sqrtf(c->vx * c->vx + c->vz * c->vz);
+        float top = c->obsTop, sp = sqrtf(c->vx * c->vx + c->vz * c->vz);
         float dirs[4] = { yaw, yaw + 0.45f, yaw - 0.45f, sp > 3 ? atan2f(c->vx, c->vz) : yaw };
+        if (t >= c->obsAt) { c->obsAt = t + 200; top = -1e9f;   // (lag fix 0.3.1: up to 24 rays a look, 5 looks a second)
         for (int k = 0; k < 12; k++) {
             float hx = sinf(dirs[k / 3]), hz = cosf(dirs[k / 3]), len = k / 3 == 3 ? fmaxf(60, sp * 5) : 80;
             float a[3] = { p[0] + hx * 10, p[1] - (k % 3) * 8.0f, p[2] + hz * 10 }, e[3] = { a[0] + hx * len, a[1], a[2] + hz * len }, hh[3];
@@ -200,6 +213,8 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
                 else if (hh[1] + 20 > top) top = hh[1] + 20;
             }
         }
+        c->obsBlocked = blockedAhead; c->obsTop = top; }
+        blockedAhead = c->obsBlocked;
         if (blockedAhead) { want = fmaxf(want, top + 20); static unsigned tl; if (tl++ < 20) H->log("heli: %s - something tall ahead (top %.0f): climbing to %.0f", vehicle_name(v), top, want); }
     }
     float tiltWant = t - h->startAt < 5000 ? 0 : dist > 80 ? -0.35f : dist > 30 ? -0.35f * (dist - 30) / 50 : 0.05f;
