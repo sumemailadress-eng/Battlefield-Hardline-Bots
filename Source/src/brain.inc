@@ -113,6 +113,7 @@ static void target_mark_alive(const float *p);
 static void lifts_level_reset(void);   // lifts.inc
 static int lift_ride(Bot *b, const float *pos, ULONGLONG t);
 static int parachute_tick(int i, Bot *b, void *soldier, const float *pos, ULONGLONG t);   // parachute.inc
+static ULONGLONG g_airAt[MAX_BOTS];   // last time each bot was aboard an aircraft (heli.inc): leaving one opens the chute at once
 static void vehicles_level_reset(void);   // drive.inc
 static int vehicle_to_take(int i, const float *pos, const float *target, float *vpOut, const char **nameOut);
 static int name_is_air(const char *nm);   // drive.inc
@@ -127,7 +128,9 @@ static void vehicle_taken_note(void);
 static void *vehicle_known_ptr(int k);
 static int soldier_seated(const float *pos);
 static int soldier_riding(const float *pos, const float *vel);
+static int vehicle_known_has(void *v);
 static int pax_think(int i, Bot *b, void *soldier, void *v, int team);
+static void human_gun_hit(void *giver, const float *victim, const char *what);   // gunner_heli.inc
 static int vehicle_has_driver(int k);
 static void *player_vehicle(void *pl, int *seatOut);   // vehicles.inc
 static int vehicle_think(int i, Bot *b, void *v, int seat, int team);   // drive.inc
@@ -1299,6 +1302,9 @@ static void bot_think(int i)
     {
         const float *v = (const float *)((char *)soldier + OFF_SOLDIER_VELOCITY);
         int k = soldier_riding(pos, v);
+        // (0.3.13 log: every "passenger" was a bot standing beside a driven vehicle, seat field 0.) Only when the game has this player in that vehicle (player +0x1668, the field its own spawn reads)
+        if (k >= 0 && FIELD(player, OFF_PLAYER_VEHICLE, void *) != vehicle_known_ptr(k)) k = -1;
+        { void *pv = FIELD(player, OFF_PLAYER_VEHICLE, void *); static unsigned pl; if (pv && pl < 40) { int known = vehicle_known_has(pv); static void *lastPv[MAX_BOTS]; if (lastPv[i] != pv) { lastPv[i] = pv; pl++; H->log("passenger: %s has a soldier and the game has it in %s (seat field %d, %s, %.1f m from it)", (char *)player + OFF_PLAYER_NAME, known ? vehicle_name(pv) : "an unknown vehicle", FIELD(player, OFF_PLAYER_ENTRY_INDEX, int), k >= 0 ? "riding" : "not seen riding", known && veh_pos(pv) ? dist2d(pos, veh_pos(pv)) : -1.0f); } } }
         if (k >= 0 && !b->seatedSince) b->seatedSince = t;
         if (k < 0) b->seatedSince = 0;
         if (k >= 0 && t - b->seatedSince > 1500) {

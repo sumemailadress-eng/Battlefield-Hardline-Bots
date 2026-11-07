@@ -830,7 +830,7 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
         if (d->exitFrom && b->crewVeh == v) { vehicle_exit(b, t, d, "dismount for flag"); return 1; }
         for (int o = 0; o < H->botCount; o++) if (o != i && g_crewCall[o].v == v && t - g_crewCall[o].at < 15000) { crew_dismount(b, t, d, v, vp, g_crewCall[o].flag, toTarget, "passenger"); return 1; }
         b->buttons |= BTN_LEAN;   // lean out of the window (Z): the seat then becomes a shooting one
-        if (gunner_think(i, b, v, seat, team)) b->buttons |= BTN_LEAN;   // a gun seat (boat turret ...): aim and fire
+        if (gunner_think(i, b, v, seat, team)) { b->buttons |= BTN_LEAN; b->roll = b->turn; b->yawIn = b->turn; }   // a gun seat (boat turret ...): aim and fire (traverse on roll as well as yaw: AltBotMod)
         if (t - d->progressAt > 3000) { if (moved < 1.0f) { if (!d->stoppedSince) d->stoppedSince = t; } else d->stoppedSince = 0; memcpy(d->progressPos, vp, 12); d->progressAt = t; }
         for (int o = 0; o < H->botCount; o++) if (g_drv[o].veh == v && (g_drv[o].queueing || (g_drv[o].navWaitAt && t - g_drv[o].navWaitAt < 500))) { d->stoppedSince = 0; break; }   // (the driver waiting its turn, or for the road map: stay in)
         {   // Stopped: out after 3 s if nobody is driving, after 15 s if someone is (a driver reversing, turning or waiting for riders isn't the end of the trip).
@@ -1417,6 +1417,7 @@ static int soldier_riding(const float *pos, const float *vel)
     }
     return -1;
 }
+static int vehicle_known_has(void *v) { for (int k = 0; k < g_knownVehN; k++) if (g_knownVeh[k].v == v) return 1; return 0; }
 static int vehicle_known_stopped_human(int k) { return k >= 0 && k < g_knownVehN && g_knownVeh[k].humanDriverTeam && g_knownVeh[k].still; }
 static int vehicle_has_driver(int k)
 {

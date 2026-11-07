@@ -41,7 +41,7 @@ static void aimlearn_load(void)
     char line[256], key[48]; int n = 0;
     while (fgets(line, sizeof line, f)) {
         int band, known, flip; float a, b, c, d, e = 1; char arcs[ARC_BINS + 2];
-        if (sscanf(line, "arc2 %47s %37s %f %f", key, arcs, &a, &b) == 4 && strlen(arcs) == ARC_BINS) { AimLearn *al = al_find(key, 1); if (al) { for (int q = 0; q < ARC_BINS; q++) al->arc[q] = (unsigned char)(arcs[q] - '0') > 2 ? 0 : (unsigned char)(arcs[q] - '0'); al->pLo = a; al->pHi = b; n++; } continue; }
+        if (sscanf(line, "arc3 %47s %37s %f %f", key, arcs, &a, &b) == 4 && strlen(arcs) == ARC_BINS) { AimLearn *al = al_find(key, 1); if (al) { for (int q = 0; q < ARC_BINS; q++) al->arc[q] = (unsigned char)(arcs[q] - '0') > 2 ? 0 : (unsigned char)(arcs[q] - '0'); al->pLo = a; al->pHi = b; n++; } continue; }
         if (sscanf(line, "seat %47s %d %d %f", key, &known, &flip, &a) == 4) { AimLearn *al = al_find(key, 1); if (al) { al->known = known; al->flip = flip; al->pitchSign = a < 0 ? -1.0f : 1.0f; n++; } }
         else if (sscanf(line, "band %47s %d %f %f %f %f %f", key, &band, &a, &b, &c, &d, &e) >= 6 && band >= 0 && band < AL_BANDS) { AimLearn *al = al_find(key, 1); if (al) { al->b[band].v[0] = a; al->b[band].v[1] = b; al->b[band].v[2] = c; al->b[band].v[3] = e; al->b[band].base = d; n++; } }
     }
@@ -58,7 +58,7 @@ static void aimlearn_save(void)
     for (int k = 0; k < g_alN; k++) {
         AimLearn *a = &g_al[k];
         fprintf(f, "seat %s %d %d %.0f\n", a->key, a->known, a->flip, a->pitchSign);
-        { char arcs[ARC_BINS + 1]; int any = a->pLo > -3 || a->pHi < 3; for (int q = 0; q < ARC_BINS; q++) { arcs[q] = (char)('0' + a->arc[q]); any |= a->arc[q]; } arcs[ARC_BINS] = 0; if (any) fprintf(f, "arc2 %s %s %.3f %.3f\n", a->key, arcs, a->pLo, a->pHi); }
+        { char arcs[ARC_BINS + 1]; int any = a->pLo > -3 || a->pHi < 3; for (int q = 0; q < ARC_BINS; q++) { arcs[q] = (char)('0' + a->arc[q]); any |= a->arc[q]; } arcs[ARC_BINS] = 0; if (any) fprintf(f, "arc3 %s %s %.3f %.3f\n", a->key, arcs, a->pLo, a->pHi); }
         for (int q = 0; q < AL_BANDS; q++) {
             AimBand *b = &a->b[q];
             float v[AL_PARAMS]; memcpy(v, b->v, sizeof v);
@@ -71,9 +71,8 @@ static void aimlearn_save(void)
 static int al_band(float d) { return d < 50 ? 0 : d < 100 ? 1 : d < 200 ? 2 : 3; }
 static AimLearn *al_seat(void *v, int seat)
 {
-    if (!g_aimLearn) return NULL;
     aimlearn_load();
-    char key[48]; snprintf(key, sizeof key, "%s_seat%d", vehicle_name(v), seat);
+    char key[48]; snprintf(key, sizeof key, "%s_gun%d", vehicle_name(v), seat);   // (0.3.19: a fresh key - the old _seat ones learned lead and height while the guns were misread)
     return al_find(key, 1);
 }
 // Every frame a seat is aiming: firing or not, and the hits it made since the last call
@@ -90,7 +89,7 @@ static AimLearn *al_soldier(void)
 }
 static void al_tick(AimLearn *a, int band, int firing, float dt, unsigned hits, float window)
 {
-    if (!a) return;
+    if (!a || !g_aimLearn) return;
     AimBand *b = &a->b[band];
     if (firing) b->fireS += dt;
     b->hits += hits;

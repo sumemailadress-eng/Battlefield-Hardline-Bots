@@ -332,6 +332,7 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
 // Here it stays put and shoots with its own weapons; over the flag it gets out and parachutes down (parachute.inc).
 static int heli_ledge(int i, Bot *b, void *soldier, const float *pos, int team, ULONGLONG t)
 {
+    g_airAt[i] = t;
     const float *vel = (const float *)((char *)soldier + OFF_SOLDIER_VELOCITY);
     if (vel[1] < -4) return 0;   // (falling: the parachute's business)
     int k = -1; float bd = 9;
@@ -358,12 +359,13 @@ static int heli_ledge(int i, Bot *b, void *soldier, const float *pos, int team, 
     return 1;
 }
 static int gunner_think(int i, Bot *b, void *v, int seat, int team);   // gunner.inc
-static void combat_tick_vehicle(int i, Bot *b, void *v, int team, int seat) { gunner_think(i, b, v, seat, team); }
+static void combat_tick_vehicle(int i, Bot *b, void *v, int team, int seat) { gunner_think(i, b, v, seat, team); b->roll = b->turn; b->yawIn = b->turn; }   // (turret traverse: AltBotMod drives it on the axis after pitch, roll; yaw too)
 
 // A bot in an aircraft. Returns 1 when handled (0: the caller makes it get out).
 static int heli_think(int i, Bot *b, void *v, int seat, int team)
 {
     if (!g_heliMode) return 0;
+    g_airAt[i] = now_ms();
     { const char *nm0 = vehicle_name(v); if (strstr(nm0, "JET") || strstr(nm0, "PLANE") || strstr(nm0, "jet") || strstr(nm0, "plane")) return 0; }   // jets are never flown (the control probe flew one into a hill, 2026-10-27)
     ULONGLONG t = now_ms();
     Heli *h = &g_heli[i];
@@ -384,8 +386,11 @@ static int heli_think(int i, Bot *b, void *v, int seat, int team)
     b->fwd = b->strafe = b->turn = 0; b->buttons = 0; b->action = 0; b->pitch = 0; b->roll = 0; b->yawIn = 0; b->throttleIn = 0;
     {   // Nearly wrecked (the tester 2026-11-07): everyone out, high enough for the parachute or on the ground. In between the pilot lets it down and the others hold on.
         float hpf = veh_hp_frac(v);
-        if (hpf < 0.18f) {
-            const float *hb = veh_pos(v); float ab = hb ? air_below(hb) : 0;
+        // (0.3.14 log: of 7 bails 6 were on the ground, "0 m up": the pilot got out of a helicopter that could still fly - the tester: "pilots seem to abandon helicopters". The next
+        // bot in reads full health until its first hit, then gets out again.) In the air: out below 18% with room for the parachute. On the ground: only when it is all but gone (5%).
+        const float *hb0 = veh_pos(v); float ab0 = hb0 ? air_below(hb0) : 0;
+        if (hpf < 0.18f && (ab0 >= 3 || hpf < 0.05f)) {
+            const float *hb = hb0; float ab = ab0;
             if (ab >= 15 || ab < 3) {
                 static ULONGLONG bl; if (t >= bl) { bl = t + 2000; H->log("heli bail: %s health %.0f%%, %.0f m up, %s gets out", vehicle_name(v), hpf * 100, ab, (char *)b->player + OFF_PLAYER_NAME); }
                 vehicle_exit(b, t, &g_drv[i], "the helicopter is nearly wrecked");

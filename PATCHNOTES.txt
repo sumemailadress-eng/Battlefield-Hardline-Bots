@@ -1,55 +1,51 @@
 ThugBot patch notes
 ===================
 
-V0.3.13 early release (2026-11-07)
-----------------------------------
+V0.4 early release (2026-11-07)
+-------------------------------
 Vehicles are still NOT officially supported and bots stay on foot by default (Vehicles=0). Turn vehicles on in the
 launcher or in Thugbot.ini to try this. Start the mod with Thugbot-Launcher.bat.
 
-NOT PLAY-TESTED: the V0.3.13 changes have only been compiled, not run in a game. The items marked "(played)" ran on
-V0.3.12 or earlier, and even those are lightly tested. Expect rough edges and read the list below.
+Tested lightly: V0.3.12 - V0.3.19 were each played for a few minutes on one PC. The last fixes to the gunners (the
+gun test, the elevation from the gun, the direction checks) and the MG damage setting were compiled but not played.
 
 Launcher
-- GitHub button, and a BOTS row with difficulty, aim learning and its limit. Start-Thugbot.bat with no arguments now
-  opens the launcher.
+- GitHub button. A BOTS row with difficulty, aim learning, its limit and VEHICLE DMG.
+- Each server's card has its own JOIN button while that server is live. Start-Thugbot.bat with no arguments opens the
+  launcher.
 
-Gun seats (helicopter door guns, car and boat guns)
-- Fixed: in V0.3.12 logs helicopter gunners were steering by a part of the helicopter shared by every seat, very
-  likely the rotor, so their aim had no relation to the target. A gun now has to stay still with no input, move on
-  input and come back. The search covers many more parts. NOT play-tested: it is not known yet how many seats will
-  find their real gun. Seats that don't aim by an estimate of the direction, which can be well off.
-- Aircraft guns are treated as holding their aim in the world, not turning with the body. NOT play-tested.
-- Fire is held in long bursts inside a wider cone instead of a short on/off timer (played, but with the bug above).
-- Each seat learns how far its gun can swing and skips targets it can't reach. Saved in Thugbot_learned\aim.txt.
-  NOT play-tested with the fixed aim.
-- A transport with bot gunners circles a flag it doesn't hold, side on (played, not reviewed in detail).
+Gunners (helicopter door guns, car and spawn truck guns)
+- Gunners use the game's own weapon object for each gun (found the way AltBotMod does it) and read where it points
+  from it. A person's hits confirmed it: that weapon pointed within 0.01 - 0.03 rad of every target hit.
+- A short gun test at the start finds which weapon is the seat's and which way the inputs turn it. Each seat keeps
+  checking those directions against the gun while it aims. NOT PLAY-TESTED in its final form.
+- Long bursts with a hold on the trigger. Each seat learns how far its gun can swing and skips targets out of reach.
+- A transport with bot gunners circles a flag it doesn't hold, side on.
+- MgDamageScale (default 2): damage from bots on gun seats, to soldiers and vehicles.
+- VehicleDamageToHumans (0 - 400%, default 100): damage bots in vehicles do to human players. It multiplies with
+  MgDamageScale.
 
-Passengers who keep their own soldier (back seats of cars and bikes)
-- New aiming, NOT play-tested. A passenger in a moving car used to run the on-foot code and could look anywhere. Each
-  seat now measures what follows its aim, then aims at the nearest enemy soldier or vehicle, leading both vehicles.
-  If its aim can't be read the old combat code runs instead. Sign of the correction is settled by hits, so a seat may
-  aim wrongly for its first 10 seconds or so of firing.
+Passengers
+- Bots who keep their own soldier in a seat (back seats of cars and bikes) aim at the nearest enemy soldier or
+  vehicle, allowing for both vehicles' movement. Only when the game itself has them in that vehicle.
+- Bots spawn into passenger and gun seats through the game's own choice.
 
-Spawning
-- Bots already spawn into vehicle seats through the game's own choice, including passenger and gun seats on helicopters,
-  SUVs, gun boats and the spawn truck (played). A setting to steer more of them there, SpawnInVehiclePercent, is OFF
-  by default because the game refused every attempt when it was tried.
+Helicopters
+- Pilots bail out only in the air below 18%, or on the ground below 5%. Before, damaged helicopters were left on the
+  ground.
+- Bots leaving a helicopter in the air open their parachute straight away. Before, it waited for a fast fall, and
+  from low down they hit the ground first. NOT PLAY-TESTED.
 
-Other changes since V0.3.1 (played unless noted)
-- Soldiers shoot at enemy vehicles, also during a fight when the vehicle is nearer, and at helicopters. Vehicle damage
-  is logged.
-- Aim learning: gun seats and soldiers trim lead, height and yaw per range as they play.
-- Helicopters fly faster and lower over flags, attack helicopters make runs at ground targets, pilots bail out at low health.
-- Passengers walk up to teammates' vehicles, the driver waits for them, and they stay aboard while someone drives.
+Other changes since V0.3.1
+- Soldiers shoot at enemy vehicles and helicopters. Vehicle damage is logged.
 - Routes outside the play area are removed. The 3D map can show the play area.
-- Trunk launchers: bots press E at a car's trunk and try a locked shot. Whether a launcher is really equipped is unconfirmed.
-- Read-only logging for finding a gun's aim: a person sitting in a non-driver seat starts a 60 s test ("aimprobe" in the log),
-  and bots keep out of that vehicle for 75 s. "aimprobe off" in Thugbot_cmd.txt turns it off.
+- Trunk launchers: bots press E at a car's trunk and try a locked shot (unconfirmed).
+- Aim learning is OFF by default (AimLearn=0).
 
 Known problems
-- Car chases are not built. Direct "set the gun's angle" aiming is not built.
-- Some seats have no readable aim. On any seat the direction may still be wrong.
-- Fill the server below its limit: 2 slots free for humans. 63 bots stopped players joining a 64 slot server.
+- Car chases are not built.
+- Some seats find no gun and fall back to an estimate, which misses.
+- Fill the server below its limit: keep 2 slots free for humans.
 
 V0.3.1 hotfix (2026-11-07)
 --------------------------

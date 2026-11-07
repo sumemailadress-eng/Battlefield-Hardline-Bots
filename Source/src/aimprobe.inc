@@ -30,7 +30,7 @@ static struct {
     float p0[3], moved, body0, turned; double msSum, msMax; int slow, dropped;
     char vehName[64], who[64];
 } A;
-static volatile LONG g_apOff, g_apReset;
+static volatile LONG g_apOff = 1, g_apReset;   // (off by default since 0.3.17: the gunhit: lines answered it, and its vehicle hold put a pilot out of the helicopter the tester spawned into - "aimprobe on" in Thugbot_cmd.txt)
 static unsigned g_apDone[AP_DONE]; static int g_apDoneN, g_apRuns;
 
 static unsigned ap_key(const char *s, int seat) { unsigned h = 5381 + seat * 131; for (; *s; s++) h = h * 33 ^ (unsigned char)*s; return h; }

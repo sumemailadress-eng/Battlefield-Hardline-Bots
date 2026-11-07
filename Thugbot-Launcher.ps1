@@ -163,7 +163,7 @@ foreach ($n in 1..4) {
     </Rectangle.Fill>
   </Rectangle>
   <Grid>
-    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
     <DockPanel>
       <TextBlock DockPanel.Dock="Right" x:Name="CardState$n" Text="OFFLINE" FontFamily="Consolas" FontSize="12" Foreground="{StaticResource Dim}" VerticalAlignment="Center"/>
       <TextBlock Text="SERVER $n" FontFamily="{StaticResource Head}" FontSize="22" Foreground="{StaticResource Txt}"/>
@@ -171,6 +171,7 @@ foreach ($n in 1..4) {
     <TextBlock Grid.Row="1" x:Name="CardName$n" Text="" FontSize="11" Foreground="{StaticResource Dim}" TextTrimming="CharacterEllipsis"/>
     <TextBlock Grid.Row="2" x:Name="CardMap$n" Text="-" Margin="0,6,0,0" FontSize="13" Foreground="{StaticResource Txt}" TextTrimming="CharacterEllipsis"/>
     <TextBlock Grid.Row="3" x:Name="CardPlayers$n" Text="" FontFamily="Consolas" FontSize="12" Foreground="{StaticResource Blue}"/>
+    <Button Grid.Row="4" x:Name="CardJoin$n" Style="{StaticResource OBtn}" Tag="$n" Content="&#9654; JOIN" Margin="0,8,0,0" Padding="0,4" FontSize="15" Visibility="Collapsed" ToolTip="Join server $n with the game"/>
   </Grid>
   </Grid>
 </Button>
@@ -479,11 +480,9 @@ $xamlText = @'
               <Button x:Name="BtnDiff" Style="{StaticResource Btn}" Content="DIFFICULTY: HARD" ToolTip="Click for the next level: easy, normal, hard, veteran, elite"/>
               <Button x:Name="BtnAimLearn" Style="{StaticResource Btn}" Content="AIM LEARNING: ON" ToolTip="Bots tune their aim from what they hit, and keep it between rounds"/>
               <Button x:Name="BtnAimMax" Style="{StaticResource Btn}" Content="LEARN LIMIT: 100%" ToolTip="How far aim learning may go: 0, 25, 50, 75 or 100%. Difficulty limits it as well"/>
+              <Button x:Name="BtnVehDmg" Style="{StaticResource Btn}" Content="VEHICLE DMG: 100%" ToolTip="Damage bots in vehicles (their guns, running you over) do to human players: 0, 25, 50, 100, 200, 300 or 400%"/>
             </UniformGrid>
 
-            <Button x:Name="BtnJoin" Style="{StaticResource OBtn}" Margin="0,10,0,10" Padding="0,12" FontSize="26" BorderThickness="2,2,2,5">
-              <TextBlock x:Name="JoinText" Text="&#9654; JOIN SERVER 1"/>
-            </Button>
 
             <TextBlock Text="TOOLS" Style="{StaticResource H}"/>
             <UniformGrid Columns="3">
@@ -605,10 +604,10 @@ try { $win = [Windows.Markup.XamlReader]::Parse($xamlText) } catch { Write-Host 
 function Find-Ctl([string]$name) { $win.FindName($name) }
 $ui = @{}
 foreach ($nm in 'GlowR', 'GlowB', 'LightR', 'LightW', 'LightB', 'TitleBox', 'TitleO', 'TitleB', 'TitleW', 'Slice1', 'Slice2', 'Sub', 'BtnBackStart', 'BtnBackStop', 'DotMysql', 'TxtMysql', 'DotWeb', 'TxtWeb', 'DotRedir', 'TxtRedir', 'DotEmu', 'TxtEmu',
-    'SelTitle', 'SelMap', 'SelImg', 'SelName', 'SelPorts', 'SelStatus', 'BtnBotsDn', 'BtnBotsUp', 'TxtBots', 'BtnBotsOn', 'BtnStart', 'BtnStop', 'BtnRestart', 'BtnRound', 'BtnNext', 'BtnVeh', 'BtnDiff', 'BtnAimLearn', 'BtnAimMax',
-    'BtnJoin', 'JoinText', 'BtnLearned', 'Btn3D', 'BtnClassic', 'RotCount', 'RotTitle', 'LstRot', 'BtnPlay', 'BtnUp', 'BtnDown', 'BtnRemove', 'LstMaps', 'LstModes',
+    'SelTitle', 'SelMap', 'SelImg', 'SelName', 'SelPorts', 'SelStatus', 'BtnBotsDn', 'BtnBotsUp', 'TxtBots', 'BtnBotsOn', 'BtnStart', 'BtnStop', 'BtnRestart', 'BtnRound', 'BtnNext', 'BtnVeh', 'BtnDiff', 'BtnAimLearn', 'BtnAimMax', 'BtnVehDmg',
+    'BtnLearned', 'Btn3D', 'BtnClassic', 'RotCount', 'RotTitle', 'LstRot', 'BtnPlay', 'BtnUp', 'BtnDown', 'BtnRemove', 'LstMaps', 'LstModes',
     'BtnGitHub', 'BtnAdd', 'BtnAllMode', 'BtnFill', 'Log', 'TabServers', 'TabMaps', 'PageServers', 'PageMaps', 'BtnShow3D', 'LstReports', 'BtnMapReload', 'BtnMapBrowser', 'WebHost', 'WebMsg') { $ui[$nm] = Find-Ctl $nm }
-foreach ($n in 1..4) { foreach ($p in 'Card', 'CardImg', 'CardState', 'CardName', 'CardMap', 'CardPlayers') { $ui["$p$n"] = Find-Ctl "$p$n" } }
+foreach ($n in 1..4) { foreach ($p in 'Card', 'CardImg', 'CardState', 'CardName', 'CardMap', 'CardPlayers', 'CardJoin') { $ui["$p$n"] = Find-Ctl "$p$n" } }
 
 function Brush([string]$hex) { $b = New-Object Windows.Media.SolidColorBrush ([Windows.Media.ColorConverter]::ConvertFromString($hex)); $b.Freeze(); $b }
 $cWhite = Brush '#FFFFFF'; $cOrange = Brush '#FF6A00'; $cDim = Brush '#8E857B'; $cTxt = Brush '#F6F2ED'; $cEdge = Brush '#38322C'; $cOffDot = Brush '#3A1A0A'; $cRed = Brush '#FF3B3B'; $cDark = Brush '#0B0B0D'
@@ -773,6 +772,7 @@ function Refresh-Servers {
             }
         }
         $ui["Card$n"].BorderBrush = $(if ($n -eq $script:sel) { $cOrange } elseif ($s.State -eq 'live') { $cWhite } else { $cEdge })
+        $ui["CardJoin$n"].Visibility = $(if ($s.State -eq 'live') { 'Visible' } else { 'Collapsed' })
     }
     Update-Selected
 }
@@ -783,7 +783,6 @@ function Update-Selected {
     $ui.SelImg.Source = $(if ($s.PicMap) { Get-Thumb $s.PicMap } else { $null })
     $ui.SelMap.Text = $(if ($s.State -eq 'live' -and $s.Info) { "NOW: $(Map-Name $s.Info[5])  /  $(Mode-Name $s.Info[4])" } elseif ($s.PicMap) { "STARTS ON: $(Map-Name $s.PicMap)" } else { '' })
     $ui.SelPorts.Text = "GAME $($s.GamePort)   RCON $($s.RconPort)   $($s.Login)"
-    $ui.JoinText.Text = "$([char]0x25B6) JOIN SERVER $n"
     $ui.RotTitle.Text = "MAP LIST // SERVER $n"
     switch ($s.State) {
         'live' { $ui.SelStatus.Text = "LIVE: $(Map-Name $s.Info[5]), $(Mode-Name $s.Info[4])`n$($s.Info[2]) of $($s.Info[3]) players"; $ui.SelStatus.Foreground = $cWhite }
@@ -798,7 +797,6 @@ function Update-Selected {
     $ui.BtnRestart.IsEnabled = $s.State -ne 'off'
     $ui.BtnRound.IsEnabled = $s.State -eq 'live'
     $ui.BtnNext.IsEnabled = $s.State -eq 'live'
-    $ui.BtnJoin.IsEnabled = $s.State -eq 'live'
 }
 
 function Fill-Rotation([int]$keep = -1) {
@@ -990,8 +988,9 @@ function Ini-Set([string]$key, [string]$val) {
 function Update-Veh {
     $on = (Ini-Get 'Vehicles' '0') -eq '1'; $ui.BtnVeh.Content = $(if ($on) { 'VEHICLES: ON' } else { 'VEHICLES: OFF' })
     $ui.BtnDiff.Content = 'DIFFICULTY: ' + (Ini-Get 'Difficulty' 'hard').ToUpper()
-    $ui.BtnAimLearn.Content = $(if ((Ini-Get 'AimLearn' '1') -ne '0') { 'AIM LEARNING: ON' } else { 'AIM LEARNING: OFF' })
+    $ui.BtnAimLearn.Content = $(if ((Ini-Get 'AimLearn' '0') -ne '0') { 'AIM LEARNING: ON' } else { 'AIM LEARNING: OFF' })
     $ui.BtnAimMax.Content = 'LEARN LIMIT: ' + [int]([double](Ini-Get 'AimLearnMaxSkill' '1') * 100) + '%'
+    $ui.BtnVehDmg.Content = 'VEHICLE DMG: ' + [int](Ini-Get 'VehicleDamageToHumans' '100') + '%'
 }
 # (the ini is read again at once: "ini" in Thugbot_cmd.txt. Applies to running servers, new settings at the next fight.)
 function Ini-Apply { try { Set-Content (Join-Path $server 'Thugbot_cmd.txt') 'ini' -Encoding ascii } catch {} }
@@ -1025,14 +1024,18 @@ $ui.BtnDiff.Add_Click({ Safe {
     $v = $lv[($k + 1) % 5]; Ini-Set 'Difficulty' $v; Ini-Apply; Update-Veh; Say "Bot difficulty: $v (all servers, now)."
 } })
 $ui.BtnAimLearn.Add_Click({ Safe {
-    $v = if ((Ini-Get 'AimLearn' '1') -ne '0') { '0' } else { '1' }
+    $v = if ((Ini-Get 'AimLearn' '0') -ne '0') { '0' } else { '1' }
     Ini-Set 'AimLearn' $v; Ini-Apply; Update-Veh; Say $(if ($v -eq '1') { 'Aim learning on (all servers, now).' } else { 'Aim learning off: bots stop changing their aim, what they learned stays in use.' })
 } })
 $ui.BtnAimMax.Add_Click({ Safe {
     $st = 0, 0.25, 0.5, 0.75, 1; $cur = [double](Ini-Get 'AimLearnMaxSkill' '1'); $next = 0; foreach ($x in $st) { if ($x -gt $cur + 0.01) { $next = $x; break } }
     Ini-Set 'AimLearnMaxSkill' ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0}', $next)); Ini-Apply; Update-Veh; Say "Aim learning limit: $([int]($next * 100))% (all servers, now)."
 } })
-$ui.BtnJoin.Add_Click({ Safe { Join-Bf4 $script:sel } })
+$ui.BtnVehDmg.Add_Click({ Safe {
+    $st = 0, 25, 50, 100, 200, 300, 400; $cur = [int](Ini-Get 'VehicleDamageToHumans' '100'); $next = 0; foreach ($x in $st) { if ($x -gt $cur) { $next = $x; break } }
+    Ini-Set 'VehicleDamageToHumans' ([string]$next); Ini-Apply; Update-Veh; Say "Damage from bots' vehicles to people: $next% (all servers, now)."
+} })
+foreach ($n in 1..4) { $ui["CardJoin$n"].Add_Click({ param($sd, $ev) $ev.Handled = $true; $t = [int]$sd.Tag; Safe { Join-Bf4 $t } }) }   # (the card's own JOIN: the click stays on it, the card isn't selected by it)
 $ui.BtnLearned.Add_Click({ Safe { $p = Join-Path $reportDir 'latest.html'; if (Test-Path $p) { Show-Web (New-Object Uri $p).AbsoluteUri 'the learned map (latest)' } else { Say 'No learned map yet - it appears a minute after a round starts.' } } })
 $ui.Btn3D.Add_Click({ Safe { Show-3D } })
 $ui.BtnGitHub.Add_Click({ Safe { Start-Process 'https://github.com/sumemailadress-eng/Battlefield-Hardline-Bots' } })

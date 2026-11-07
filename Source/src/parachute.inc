@@ -92,6 +92,21 @@ static int parachute_tick(int i, Bot *b, void *soldier, const float *pos, ULONGL
         static unsigned logged;
         if (logged++ < 30) H->log("chute: %s landed - %.0f m down in %.1f s (%.1f m/s)", (char *)b->player + OFF_PLAYER_NAME, c->fallTop - pos[1], (t - c->jumpAt) / 1000.0, (c->fallTop - pos[1]) / fmaxf(0.1f, (t - c->jumpAt) / 1000.0f));
     }
+    // (the tester 2026-11-07: "bot parachutes should deploy the instant they eject - so far they slam to the ground and die") Just out of a helicopter (bail, drop over a flag, off
+    // the ledge) with 5 m+ of air below: the parachute key from the first frame on foot, held 400 ms and then 250 ms of every 500, until it has come down 1.5 s slowly (a chute) or
+    // lands. Before, it waited for 7 m/s of fall with 10 m below: from a low helicopter that was too late.
+    if (g_airAt[i] && t - g_airAt[i] < 6000) {
+        float ab = air_below(pos);
+        if (ab > 5 && !(t - g_airAt[i] > 1500 && v[1] > -6.0f && c->falling)) {
+            if (!c->falling) { c->falling = 1; c->fallTop = pos[1]; c->jumpAt = t; static unsigned el; if (el++ < 40) H->log("chute: %s left the aircraft %.0f m up - parachute now", (char *)b->player + OFF_PLAYER_NAME, ab); }
+            unsigned long long since = t - c->jumpAt;
+            if (since < 400 || since % 500 < 250) { b->buttons |= BTN_CHUTE | BTN_JUMP; b->action = PP_ACT_JUMP; }
+            b->fwd = 1; b->strafe = 0;
+            b->turn = turn_input(soldier_yaw(soldier), atan2f(b->target[0] - pos[0], b->target[2] - pos[2]), 2.0f);
+            return 1;
+        }
+        if (ab <= 5) g_airAt[i] = 0;
+    }
     // Off the edge it chose: the chute opens 1.5 s after leaving it (the tester: "parachute a second and a half after jumping
     // out" - clear of the building first), sooner if the ground comes within 30 m.
     if (c->active && v[1] < -2.5f && air_below(pos) > 10) { c->active = 0; c->leftAt = t; }
@@ -99,7 +114,7 @@ static int parachute_tick(int i, Bot *b, void *soldier, const float *pos, ULONGL
         if (air_below(pos) < 2 || t - c->leftAt > 30000) c->leftAt = 0;
         else if (t - c->leftAt < 1500 && air_below(pos) > 30) { b->fwd = 1; b->strafe = 0; return 1; }   // (falling clear, still pushing away from the wall)
     }
-    if (v[1] < -7 && air_below(pos) > 10) {
+    if (v[1] < -4 && air_below(pos) > 8) {
         if (!c->falling) { c->falling = 1; c->fallTop = pos[1]; c->jumpAt = 0; }
         // Jump and the parachute key, held 250 ms of every 700 (one-frame taps were missed: bots fell 120 m pressing
         // jump every 600 ms). Logged once per fall.

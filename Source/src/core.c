@@ -618,6 +618,20 @@ static void *h_onDamage(void *self, void *ret, void *info)
     if (victim) combat_note_hit(victim, giver);
     int bot = 0;
     for (int i = 0; giver && i < H->botCount; i++) if (H->bots[i] == giver) { bot = 1; g_hitsBy[i]++; break; }
+    // (the tester 2026-11-07: "have an option for damage from vehicles to humans") VehicleDamageToHumans: a bot in a vehicle (its guns, a heli's guns, running someone over) hitting a person
+    // does that percent of the damage. The amount is the same DamageInfo field the vehicle hook reads; scaled before the game applies it.
+    // (the tester 2026-11-07: "MG damage should be 2x stronger") MgDamageScale: a bot on a vehicle's gun seat (not the driver / pilot) hits for that much more, soldiers and vehicles
+    int gseat = -1;
+    if (bot && victim && player_vehicle(giver, &gseat) && !IsBadWritePtr((char *)info + OFF_DMG_AMOUNT, 4)) {
+        void *vp = NULL; for (int j = 0; j < g_playerCount && !vp; j++) if (bot_soldier_raw(g_players[j]) == victim) vp = g_players[j];
+        float k = (gseat > 0 ? g_mgScale : 1.0f) * (vp && !is_bot_player(vp) ? g_vehDmgHumansPct / 100.0f : 1.0f);
+        float *amt = (float *)((char *)info + OFF_DMG_AMOUNT), was = *amt;
+        if (k != 1.0f && was == was && was > 0) {
+            *amt = was * k;
+            static unsigned l; if (l++ < 20) H->log("vehdmg: %s (seat %d) hit %s: damage %.1f -> %.1f (x%.2f)", (char *)giver + OFF_PLAYER_NAME, gseat, vp ? (char *)vp + OFF_PLAYER_NAME : "a soldier", was, *amt, k);
+        }
+    }
+    if (!bot && giver && victim) human_gun_hit(giver, soldier_pos(victim), "a soldier");   // (ground truth for the gun seats: where a person's gun pointed when it hit)
     if (bot && !IsBadWritePtr((char *)info + OFF_DMG_FLAGS, 1)) {
         unsigned char *flags = (unsigned char *)info + OFF_DMG_FLAGS;
         g_dmgBotHits++;
@@ -636,12 +650,14 @@ static void *veh_damage(OnDamage_t orig, void *self, void *ret, void *info)
     void *giver = damage_giver_player(info);
     int bot = 0;
     for (int i = 0; giver && i < H->botCount; i++) if (H->bots[i] == giver) { bot = 1; break; }
+    { int gs = -1; if (bot && g_mgScale != 1.0f && player_vehicle(giver, &gs) && gs > 0 && !IsBadWritePtr((char *)info + OFF_DMG_AMOUNT, 4)) { float *am = (float *)((char *)info + OFF_DMG_AMOUNT); if (*am == *am && *am > 0) *am *= g_mgScale; } }   // (MgDamageScale on vehicles too)
     VehHealth_t ha = (VehHealth_t)(H->image + RVA_VEH_HEALTH_A), hb = (VehHealth_t)(H->image + RVA_VEH_HEALTH_B);
     float a0 = ha(self), b0 = hb(self), amount = !IsBadReadPtr((char *)info + OFF_DMG_AMOUNT, 4) ? *(float *)((char *)info + OFF_DMG_AMOUNT) : 0;
     void *r = orig(self, ret, info);
     float a1 = ha(self), b1 = hb(self);
     static unsigned hitsBot, hitsOther; static float sumBot; static ULONGLONG lineAt, minAt;
     ULONGLONG t = GetTickCount64();
+    if (!bot && giver) { void **own1 = !IsBadReadPtr((char *)self + 8, 8) ? FIELD(self, 8, void **) : NULL; void *v1 = own1 && !IsBadReadPtr(own1, 8) ? *own1 : NULL; const float *q1 = v1 ? veh_pos(v1) : NULL; if (q1) human_gun_hit(giver, q1, vehicle_name(v1)); }
     if (bot) { hitsBot++; sumBot += amount; for (int i = 0; i < H->botCount; i++) if (H->bots[i] == giver) g_vehHitsBy[i]++; } else hitsOther++;
     { void **own0 = !IsBadReadPtr((char *)self + 8, 8) ? FIELD(self, 8, void **) : NULL; void *v0 = own0 && !IsBadReadPtr(own0, 8) ? *own0 : NULL; if (v0) veh_hp_note(v0, a1, b1); }
     if (t >= lineAt) {
@@ -827,6 +843,7 @@ __declspec(dllexport) void thugbot_shutdown(void)
     unhook_call(&g_hookSeq);
     unhook_call(&g_hookCopy);
     unhook_call(&g_hookSpawn);
+    weapscan_stop();
     unhook_vtable_slot(&g_onDamageSlot, (void *)o_onDamage); if (g_vehDmgSlotH) unhook_vtable_slot(&g_vehDmgSlotH, (void *)o_vehDmgH); if (g_vehDmgSlotB) unhook_vtable_slot(&g_vehDmgSlotB, (void *)o_vehDmgB);
     if (g_ctfSlot) unhook_vtable_slot(&g_ctfSlot, (void *)o_ctfOnMsg);
     for (int k = 0; k < 200 && g_vehScanBusy; k++) Sleep(50);   // the vehicle memory scan thread runs our code: let it finish
