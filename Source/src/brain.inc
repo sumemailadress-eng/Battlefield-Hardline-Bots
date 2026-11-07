@@ -42,6 +42,7 @@ typedef struct Bot {
     float steerPrev, flipYaw, flipWant, flipDist; unsigned flips;
     float stuckAt[3], escape[3]; int stuckRepeat; ULONGLONG stuckFirst, escapeUntil;   // repeated stuck -> escape point
     ULONGLONG takingAt;             // pressing E at a car it is taking
+    void *crewVeh; int crewFlag, crewGo; ULONGLONG crewAt; float crewPos[3];   // the vehicle it left to walk to a flag: only ever compared, never read
     void *noVeh; ULONGLONG noVehUntil;   // a car it couldn't get into (4 s of E): left alone for a minute
     ULONGLONG seatedSince, seatedStillSince;   // standing still inside a known car (a passenger seat); the car stopped too
     ULONGLONG slowSince, slideUntil; float slideStrafe; int slides;   // scraping along a wall
@@ -59,6 +60,7 @@ typedef struct Bot {
     unsigned seed;
     int inVehicle;                  // seated in a vehicle this frame (reverse / brake input allowed)
     ULONGLONG poolSince, poolCool, poolOutAt; int poolWet, poolLoops; float poolRim[3], poolBest, poolOutPos[3], poolOutRim[3];   // in a pool, heading for the rim to climb out
+    int heliPilot;                  // flying a helicopter this frame: core.c's hook owns pitch, yaw and roll
     float roll, yawIn, throttleIn;  // extra analog inputs through the input hook (EIARoll, EIAYaw): aircraft
     // explore (no real progress for 12 s): walking an open direction picked by rays
     ULONGLONG progAt, exploreUntil, exploreBlockedAt; float progPos[3], exploreDir, exploreFrom[3], tried[3]; int exploreN, triedN;
@@ -111,6 +113,10 @@ static int lift_ride(Bot *b, const float *pos, ULONGLONG t);
 static int parachute_tick(int i, Bot *b, void *soldier, const float *pos, ULONGLONG t);   // parachute.inc
 static void vehicles_level_reset(void);   // drive.inc
 static int vehicle_to_take(int i, const float *pos, const float *target, float *vpOut, const char **nameOut);
+static int name_is_air(const char *nm);   // drive.inc
+static void vehicle_onfoot_reset(int i);   // drive.inc
+static const char *vehicle_name(void *v);
+static int is_bot_player(void *pl);   // human_routes.inc
 static void vehicle_taken_note(void);
 static void *vehicle_known_ptr(int k);
 static int soldier_seated(const float *pos);
@@ -335,23 +341,27 @@ static void nav_tick(void)
         }
         return;
     }
-    // Grow the grid when anyone is outside it (the first build covers the flags and the first spawns plus 150 m).
+    // Grow the grid only for a human on foot outside it, two looks running (FloodBots: a bot off at the map edge grew it and every
+    // bot lost its route each time). Routes are world points: kept while the bigger grid is built.
     if (H->frame % 300 == 0) {
         float lo[2] = { 1e9f, 1e9f }, hi[2] = { -1e9f, -1e9f }; int out = 0;
+        static int outLooks;
         for (int j = 0; j < g_playerCount; j++) {
-            void *s = bot_soldier_raw(g_players[j]);
-            if (!s) continue;
+            void *s = bot_soldier(g_players[j]);
+            if (!s || player_vehicle(g_players[j], NULL) || is_bot_player(g_players[j])) continue;
             const float *p = soldier_pos(s);
-            if (!nav_covers(g_nav, p[0], p[2], 20)) out++;
+            if (nav_covers(g_nav, p[0], p[2], 20)) continue;
+            out++;
             lo[0] = fminf(lo[0], p[0]); lo[1] = fminf(lo[1], p[2]); hi[0] = fmaxf(hi[0], p[0]); hi[1] = fmaxf(hi[1], p[2]);
         }
-        if (out) {
+        outLooks = out ? outLooks + 1 : 0;
+        if (out && outLooks >= 2) {
+            outLooks = 0;
             float gx1 = g_nav->x0 + (g_nav->w - 1) * g_nav->cell, gz1 = g_nav->z0 + (g_nav->h - 1) * g_nav->cell;
             NavGrid *ng = nav_expand_bounds(g_nav, fminf(g_nav->x0, lo[0] - 80), fminf(g_nav->z0, lo[1] - 80), fmaxf(gx1, hi[0] + 80), fmaxf(gz1, hi[1] + 80));
             if (ng) {
                 H->log("nav: %d player(s) outside the grid - growing it from %dx%d to %dx%d cells", out, g_nav->w, g_nav->h, ng->w, ng->h);
                 nav_cancel_paths(); nav_free(g_nav); g_nav = ng; g_navBuilding = 1;
-                for (int i = 0; i < MAX_BOTS; i++) g_bot[i].npts = 0;
                 return;
             }
         }
@@ -903,10 +913,13 @@ static int g_planTrace;
 // planner queue: 63 bots), a bot with no route used to stand "waiting for a route" or walk straight at the target.
 // Now it takes a known route meanwhile - a learned one to the target, a saved one, or a learned one that gets it closer -
 // and asks again in 5 s (the planner's answer then replaces it).
+int nav_find_path_sync(const NavGrid *g, NavRayFn ray, float sx, float sy, float sz, float tx, float ty, float tz, float *out, int maxPts);   // nav.c
 static unsigned g_stopgaps;
+static ULONGLONG g_planDeferAt[MAX_BOTS];   // last time this bot's plan was left waiting in the planner queue
+static char g_stopgapRoute[MAX_BOTS];   // walking a stand-in route: the planner's answer may still replace it
 static int plan_stopgap(int i, Bot *b, const float *pos, ULONGLONG t)
 {
-    (void)i;
+    g_planDeferAt[i] = t;
     if (b->npts && b->wp < b->npts) return 0;   // still has one
     int n = 0, k = -1;
     g_lrSeed = b->seed; g_lrPick = -1;
@@ -929,8 +942,31 @@ static int plan_stopgap(int i, Bot *b, const float *pos, ULONGLONG t)
             memcpy(b->path, &g_bot[best].path[bestK * 3], (size_t)n * 12);
         }
     }
+    if (!n && (b->targetFlag >= 0 || b->objRoute)) {
+        // (FloodBots) any learned route towards the target, however far off: joined in a straight line when that line is
+        // clear, else the grid's way to its nearest point (60 m at most, one such search a frame, capped)
+        static float tail[BRAIN_PATH_MAX * 3]; float join[3];
+        int nt = human_route_far(pos, b->target, join, tail, BRAIN_PATH_MAX - 1);
+        if (nt && (dist2d(pos, join) < 2 || nav_segment_clear(ray_cast, pos, join))) {
+            memcpy(b->path, pos, 12); memcpy(&b->path[3], tail, (size_t)nt * 12); n = nt + 1;
+            b->lroute = g_lrPick;
+        } else if (nt && dist2d(pos, join) < 60) {
+            static unsigned gridFrame;
+            if (gridFrame != H->frame) {
+                gridFrame = H->frame;
+                static float lead[BRAIN_PATH_MAX * 3];
+                extern int g_syncMaxExpanded; g_syncMaxExpanded = 8000;
+                int nl = nav_find_path_sync(g_nav, ray_cast, pos[0], pos[1], pos[2], join[0], join[1], join[2], lead, BRAIN_PATH_MAX / 2); g_syncMaxExpanded = 0;
+                if (nl >= 2 && nl + nt <= BRAIN_PATH_MAX) {
+                    memcpy(b->path, lead, (size_t)nl * 12); memcpy(&b->path[nl * 3], tail, (size_t)nt * 12); n = nl + nt;
+                    b->lroute = g_lrPick;
+                }
+            }
+        }
+    }
     if (!n) return 0;
     b->npts = n; b->wp = n > 1 ? 1 : 0; b->route = k; b->noRouteSince = 0;
+    g_stopgapRoute[i] = 1;
     b->planAt = t - ((b->targetFlag >= 0 || b->objRoute) ? 15000 : 1000);   // (plan() looks again in 5 s)
     g_stopgaps++;
     return 1;
@@ -946,12 +982,18 @@ static void plan(int i, Bot *b, const float *pos)
         }
         return;
     }
+    // Committed: a real route to a flag is walked to its end, not swapped every 20 s for another pick (the tester 2026-11-06: "they change their minds all the time").
+    // Only being stuck on it, or 2 minutes on it, opens it up again; a new flag clears the route where the flag is chosen.
+    if (b->npts && b->wp < b->npts && (b->targetFlag >= 0 || b->objRoute) && !g_stopgapRoute[i] && !b->stuckRepeat && t < b->planAt + 120000) return;
     if (b->npts && b->wp < b->npts && t < b->planAt + ((b->targetFlag >= 0 || b->objRoute) ? 20000 : 6000)) return;   // (a route still being walked: re-planned every 20 s for a flag, 6 s for anything else - was 8 / 3: the planner never caught up)
     if (!b->npts && b->planAt && t < b->planAt + 1500 && dist2d(b->target, b->planTo) < 3) return;   // none found: retry in 1.5 s
     // At the end of its route and at the target (or as near as the route got): nothing to plan. It used to plan again every
     // frame there - about one plan a second per bot on Code Blue, each a fresh learned / saved route.
     if (b->npts && b->wp >= b->npts && dist2d(pos, b->target) < 3 && fabsf(pos[1] - b->target[1]) < 2.5f && dist2d(b->target, b->planTo) < 1) return;
     if (b->npts && b->wp >= b->npts && t < b->planAt + 1500 && dist2d(b->target, b->planTo) < 3) return;   // (ended short of it: not every frame either)
+    // (FloodBots) waiting on the planner queue: look again in 0.3 s, not every frame
+    if (g_planDeferAt[i] && t < g_planDeferAt[i] + 300 && dist2d(b->target, b->planTo) < 3) return;
+    g_stopgapRoute[i] = 0;
     g_planWhy[!b->npts ? 0 : b->wp >= b->npts ? 1 : 2]++;
     {   // (trace: "plantrace": the next 40 plans begun by bot 5 - what it was doing, where it was going)
         if (g_planTrace > 0 && i == 5) { g_planTrace--; H->log("plantrace: %s npts %d wp %d target %.1f %.1f %.1f planTo %.1f %.1f %.1f flag %d why %s fight %d", (char *)b->player + OFF_PLAYER_NAME,
@@ -1117,6 +1159,7 @@ static void bot_think(int i)
         int seat = -1;
         void *veh = player_vehicle(player, &seat);
         b->inVehicle = veh != NULL;
+        if (!veh) { b->heliPilot = 0; b->roll = b->yawIn = b->throttleIn = 0; vehicle_onfoot_reset(i); }   // (out of a helicopter: no yaw / roll left held on foot)
         if (veh) { b->alive = 1; vehicle_think(i, b, veh, seat, FIELD(player, OFF_PLAYER_TEAM, int)); return; }
     }
     void *soldier = bot_soldier(player);
@@ -1267,10 +1310,11 @@ static void bot_think(int i)
             b->noVeh = vehicle_known_ptr(k); b->noVehUntil = t + 60000; b->takingAt = 0; k = -1;
         }
         if (k >= 0) {
-            if (dist2d(pos, vp) < 3.5f) {
+            int vair = name_is_air(vname);
+            if (dist2d(pos, vp) < (vair ? 5.0f : 3.5f)) {   // (a helicopter's centre is further from its door)
                 b->turn = turn_input(soldier_yaw(soldier), atan2f(vp[0] - pos[0], vp[2] - pos[2]), 3.0f);
                 b->fwd = 0.2f; b->strafe = 0;
-                if ((t / 400) % 2 == 0) b->buttons |= BTN_INTERACT;
+                if ((t / 400) % 2 == 0) b->buttons |= vair ? BTN_INTERACT | BTN_EXIT : BTN_INTERACT;   // (the second hash a human's E sends: FloodBots)
                 b->why = "getting in a car";
                 if (!b->takingAt) { b->takingAt = t; vehicle_taken_note(); static unsigned logged; if (logged++ < 30) H->log("drive: %s takes the %s at %.0f %.0f", (char *)player + OFF_PLAYER_NAME, vname, vp[0], vp[2]); }
                 return;
@@ -1558,7 +1602,11 @@ static void strafe_check(int i, Bot *b, void *soldier)
 #include "vehicles.inc"
 #include "drive.inc"
 #include "heli.inc"
+#if THUGBOT_HELI_PORT
+#include "gunner_heli.inc"
+#else
 #include "gunner.inc"
+#endif
 #include "lifts.inc"
 #include "parachute.inc"
 #include "pool.inc"
@@ -1747,6 +1795,6 @@ static int brain_buttons(void *pp, unsigned *buttons, float *pitch, float *roll,
 {
     void *player = FIELD(pp, OFF_PP_PLAYER, void *);
     for (int i = 0; i < MAX_BOTS; i++)
-        if (g_bot[i].player == player) { *buttons = g_bot[i].buttons; if (g_jumpUsed[i] == 1 && now_ms() < g_mx[i].vaultUntil) *buttons &= ~BTN_JUMP; *pitch = g_bot[i].pitch; *roll = g_bot[i].roll; *yaw = g_bot[i].yawIn; *thr = g_bot[i].throttleIn; return 1; }
+        if (g_bot[i].player == player) { *buttons = g_bot[i].buttons; if (g_jumpUsed[i] == 1 && now_ms() < g_mx[i].vaultUntil) *buttons &= ~BTN_JUMP; *pitch = g_bot[i].pitch; *roll = g_bot[i].roll; *yaw = g_bot[i].yawIn; *thr = g_bot[i].throttleIn; return g_bot[i].inVehicle && g_bot[i].heliPilot ? 2 : 1; }
     return 0;
 }

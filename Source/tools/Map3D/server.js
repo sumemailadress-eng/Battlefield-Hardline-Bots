@@ -12,6 +12,7 @@
 //   Thugbot_report\<map>_*.html        flags and spawns (read only)
 // Every save first copies the old files to Thugbot_learned_backup_3d\.
 const http = require('http'), fs = require('fs'), path = require('path');
+const { findOverhead } = require('./overhead.js');   // bridges and beams
 
 function iniServer() {
     try {
@@ -36,7 +37,7 @@ const safeMap = m => /^[A-Za-z0-9_]+$/.test(m || '') ? m : null;
 function buildCloud(map) {
     const file = path.join(NAV, map + '.v8.nav');
     const st = fs.statSync(file);
-    const cacheFile = path.join(CACHE, map + '.cloud5');   // (2: + slope per point, 3: walls down from roof edges, 4: + floor surface triangles)
+    const cacheFile = path.join(CACHE, map + '.cloud6');   // (2: + slope per point, 3: walls down from roof edges, 4: + floor surface triangles)
     try { const c = fs.statSync(cacheFile); if (c.mtimeMs > st.mtimeMs) return fs.readFileSync(cacheFile); } catch (e) {}
     const buf = fs.readFileSync(file);
     const magic = buf.readUInt32LE(0);
@@ -46,6 +47,9 @@ function buildCloud(map) {
     const n = w * h * L, HO = 60;
     const height = new Float32Array(buf.buffer.slice(buf.byteOffset + HO, buf.byteOffset + HO + n * 4));
     const flags = buf.subarray(HO + n * 4, HO + n * 5), edges = buf.subarray(HO + n * 5, HO + n * 6);
+    // (the tester 2026-11-06: "bridges show no opening on the bottom") an edge with a drop drew a wall down to the floor below: right for
+    // a building's face, but it closed bridges off. Bridges and beams get no wall down.
+    const isOver = new Uint8Array(n); for (const it of findOverhead(file).items) for (const i of it.nodes) isOver[i] = 1;
     const pos = [], kind = [], slope = []; const nodeIdx = new Int32Array(n).fill(-1);   // (floor node -> its point, for the surface)
     let ymin = Infinity, ymax = -Infinity;
     const put = (x, y, z, k, s = 0) => { pos.push(x, y, z); kind.push(k); slope.push(s); };
@@ -79,7 +83,7 @@ function buildCloud(map) {
                     const nc = (nz * w + nx) * L; let best = null;
                     for (let k = 0; k < L; k++) if (flags[nc + k] & WALKABLE) { const dh = height[nc + k] - y; if (best === null || Math.abs(dh) < Math.abs(best)) best = dh; }
                     if (best !== null && best < -1) {
-                        if (best > -2.5) continue;   // (a step down: no wall)
+                        if (best > -2.5 || isOver[node]) continue;   // (a step down, or the side of a bridge: no wall)
                         let bottom = y + best;   // (the nearest neighbour floor is the highest one below)
                         for (let k = 0; k < L; k++) if (k !== l && (flags[c * L + k] & WALKABLE) && height[c * L + k] < y - 1 && height[c * L + k] > bottom) bottom = height[c * L + k];   // (only down to this cell's own next floor: each storey draws its own stretch)
                         lo = Math.max(bottom - y, -400); hi = -0.2;
@@ -128,6 +132,7 @@ function buildCloud(map) {
 // ---- route files
 const read = f => { try { return fs.readFileSync(f, 'utf8'); } catch (e) { return null; } };
 const exitsFile = m => path.join(LEARN, m + '.exits');
+const vehiclesFile = m => path.join(LEARN, m + '.vehicles');   // where vehicles stood at round start, written by the bots: "veh <name> x y z yaw <rounds seen>" (read only)
 const learnFile = m => path.join(LEARN, m + '.v2.learn'), vFile = m => path.join(LEARN, m + '.vroutes'), pFile = m => path.join(ROUTES, m + '.v8.routes');
 function reportData(map) {
     let best = null;
@@ -164,6 +169,8 @@ function loadRoutes(map) {
     }
     const et = read(exitsFile(map));
     out.exits = et ? et.split(/\r?\n/).map(l => l.trim().split(/\s+/).map(Number)).filter(p => p.length === 3 && p.every(isFinite)) : [];
+    const vs = read(vehiclesFile(map));
+    out.vehicles = vs ? vs.split(/\r?\n/).map(l => l.trim().split(/\s+/)).filter(v => v[0] === 'veh' && v.length >= 7).map(v => ({ name: v[1], p: [+v[2], +v[3], +v[4]], yaw: +v[5], seen: +v[6] })).filter(v => v.p.every(isFinite)) : [];
     out.files = { learn: !!lt, veh: !!vt, planned: !!pt, exits: !!et };
     return out;
 }
@@ -222,9 +229,42 @@ function liveMap() {
     } catch (e) { return null; }
 }
 
+const overheadData = map => findOverhead(path.join(NAV, map + '.v8.nav')).items.map(({ nodes, ...it }) => it);
+
+// ---- where the roads are (the tester 2026-11-06), from what the bots already learned, as binary: [scan count, trail count] as Uint32, then
+// x y z floats. <map>.roadscan = grid nodes on a road material ("w h x0 z0 cell", then one node per line; only for this grid);
+// <map>.roads = lines of "x y z x y z ..." that vehicles were driven along.
+function roadData(map) {
+    const scan = [], trail = [];
+    const buf = fs.readFileSync(path.join(NAV, map + '.v8.nav'));
+    const x0 = buf.readFloatLE(36), z0 = buf.readFloatLE(40), cell = buf.readFloatLE(44), w = buf.readInt32LE(48), h = buf.readInt32LE(52), n = w * h * L;
+    const height = new Float32Array(buf.buffer.slice(buf.byteOffset + 60, buf.byteOffset + 60 + n * 4));
+    const rs = read(path.join(LEARN, map + '.roadscan'));
+    if (rs) {
+        const lines = rs.split(/\r?\n/), head = lines[0].trim().split(/\s+/).map(Number);
+        if (head[0] === w && head[1] === h && Math.abs(head[2] - x0) < 0.01 && Math.abs(head[3] - z0) < 0.01)
+            for (let k = 1; k < lines.length; k++) {
+                const node = +lines[k]; if (!lines[k] || !(node >= 0 && node < n)) continue;
+                const y = height[node]; if (!isFinite(y)) continue;
+                const c = Math.floor(node / L), cz = Math.floor(c / w), cx = c - cz * w; scan.push(x0 + cx * cell, y, z0 + cz * cell);
+            }
+    }
+    const rd = read(path.join(LEARN, map + '.roads'));
+    if (rd) for (const l of rd.split(/\r?\n/)) {
+        const v = l.trim().split(/\s+/).map(Number);
+        for (let k = 0; k + 5 < v.length; k += 3) {   // (points along each stretch, every 2 m)
+            const d = Math.hypot(v[k + 3] - v[k], v[k + 5] - v[k + 2]), steps = Math.min(40, Math.max(1, Math.ceil(d / 2)));
+            if (d > 80 || !isFinite(d)) continue;
+            for (let q = 0; q < steps; q++) { const f = q / steps; trail.push(v[k] + (v[k + 3] - v[k]) * f, v[k + 1] + (v[k + 4] - v[k + 1]) * f, v[k + 2] + (v[k + 5] - v[k + 2]) * f); }
+        }
+    }
+    const head = Buffer.from(new Uint32Array([scan.length / 3, trail.length / 3]).buffer);
+    return Buffer.concat([head, Buffer.from(new Float32Array(scan).buffer), Buffer.from(new Float32Array(trail).buffer)]);
+}
+
 // ---- web server
 const send = (res, code, type, body) => { res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store' }); res.end(body); };
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://localhost'); const map = safeMap(u.searchParams.get('map'));
     try {
         if (u.pathname === '/' || u.pathname === '/index.html') return send(res, 200, 'text/html; charset=utf-8', fs.readFileSync(path.join(__dirname, 'index.html')));
@@ -235,6 +275,11 @@ http.createServer((req, res) => {
             const maps = all.filter(m => { const b = m.match(/^(.+?)_[A-Z][A-Za-z]+\d+$/); return !b || !all.includes(b[1]); }).sort();
             return send(res, 200, 'application/json', JSON.stringify({ server: SERVER, maps, live: liveMap(), limits: LIMITS, features: FEATURES }));
         }
+        // the map's own top-down image, read from this PC's game files (textures\\<map>.jpg + .json: re\\scripts\\fb_minimap.py)
+        if (u.pathname === '/api/texinfo' && map) { const t = read(path.join(__dirname, 'textures', map + '.json')); return send(res, 200, 'application/json', t || 'null'); }
+        if (u.pathname === '/api/teximg' && map) return send(res, 200, 'image/jpeg', fs.readFileSync(path.join(__dirname, 'textures', map + '.jpg')));
+        if (u.pathname === '/api/roads' && map) return send(res, 200, 'application/octet-stream', roadData(map));
+        if (u.pathname === '/api/overhead' && map) return send(res, 200, 'application/json', JSON.stringify(overheadData(map)));
         if (u.pathname === '/api/cloud' && map) return send(res, 200, 'application/octet-stream', buildCloud(map));
         if (u.pathname === '/api/routes' && map && req.method === 'GET') return send(res, 200, 'application/json', JSON.stringify({ ...loadRoutes(map), ...reportData(map), live: liveMap() === map }));
         if (u.pathname === '/api/routes' && map && req.method === 'POST') {
@@ -254,4 +299,6 @@ http.createServer((req, res) => {
         }
         send(res, 404, 'text/plain', 'not found');
     } catch (e) { console.error(e); send(res, 500, 'text/plain', String(e.message || e)); }
-}).listen(PORT, '127.0.0.1', () => console.log(`Thugbot 3D map: http://localhost:${PORT}/  (server folder ${SERVER})`));
+});
+module.exports = { roadData, buildCloud, loadRoutes, reportData, overheadData, liveMap, LIMITS };
+if (require.main === module) server.listen(PORT, '127.0.0.1', () => console.log(`Thugbot 3D map: http://localhost:${PORT}/  (server folder ${SERVER})`));

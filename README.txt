@@ -1,6 +1,6 @@
 ThugBot - player bots for a Battlefield Hardline server (BF-Portable)
 =====================================================================
-Version 0.2, early release. What changed: PATCHNOTES.txt. Vehicles are not officially supported yet.
+Version 0.3, early release. What changed: PATCHNOTES.txt. Vehicles are not officially supported yet.
 
 ThugBot fills a Battlefield Hardline dedicated server with bots that play like players: they capture and
 defend flags, fight with cover, crouch, vault, open doors, knife glass, throw grenades, use grenade
@@ -63,6 +63,7 @@ SETTINGS (Battlefield_BFH_Server\Thugbot.ini)
   Aggression   0 cautious, 1 normal, 2 aggressive
   DefendShare  part of each team that defends owned flags (0 - 0.8)
   Vehicles     0 = bots stay on foot (default), 1 = they drive and ride vehicles (experimental, not officially supported yet)
+  HeliFly      1 = with Vehicles=1 bots fly helicopters (default, experimental), 0 = pilots get out
   Combat, Peek leave at 1
 Changes apply when the server starts, or at once by writing "ini" into Battlefield_BFH_Server\Thugbot_cmd.txt.
 
@@ -123,6 +124,6 @@ TROUBLESHOOTING
   there are used first. "routes rebuild" re-makes the saved routes of the current map.
 - Server feels slow with 60 bots: use fewer bots per team.
 
-Known limits: vehicles are not officially supported yet (off by default, driving is rough); bots don't fly
-helicopters or drive boats; vaults and water exits still fail sometimes (see PATCHNOTES.txt);
+Known limits: vehicles are not officially supported yet (off by default, driving and flying are rough and not
+play-tested in a full round); bots don't drive boats; vaults and water exits still fail sometimes (see PATCHNOTES.txt);
 the objective modes Heist / Blood Money / Hotwire / Crosshair / Rescue are played as "hunt the enemy".

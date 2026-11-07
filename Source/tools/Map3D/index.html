@@ -15,7 +15,7 @@ input[type=range]{flex:1;min-width:80px}
 .sw{width:10px;height:10px;border-radius:2px;display:inline-block}
 #list{max-height:260px;overflow-y:auto;border:1px solid var(--line);border-radius:6px}
 #list div{padding:3px 6px;cursor:pointer;display:flex;gap:6px;align-items:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#list div:hover{background:#24252c}#list div.sel{background:#1c3d5a}
+#vehList div{padding:2px 6px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}#vehList div:hover{background:#24252c}#list div:hover{background:#24252c}#list div.sel{background:#1c3d5a}
 #msg{min-height:18px;color:var(--mut);margin-top:6px}#warn{display:none;background:#3b2a05;color:#ffd43b;border-radius:6px;padding:6px 8px;margin:6px 0}
 #hud{position:fixed;left:312px;bottom:10px;background:rgba(20,20,24,.85);border:1px solid var(--line);border-radius:6px;padding:5px 9px;color:var(--mut);pointer-events:none}
 #help{color:var(--mut);font-size:12px}#help b{color:var(--fg);font-weight:600}
@@ -33,9 +33,13 @@ a{color:var(--acc)}
   <div class="row">Hide above <input type="range" id="cut" min="0" max="1000" value="1000"><span id="cutV"></span></div>
   <div class="row">Point size <input type="range" id="psize" min="1" max="12" value="4"></div>
   <div class="row">Floors as <select id="fmode"><option value="1">Surface (shows ramps)</option><option value="0">Points</option></select></div>
-  <div class="row">Colour by <select id="cmode"><option value="0">Slope (flat to steep)</option><option value="1">Height</option><option value="2">Plain</option></select></div>
+  <div class="row">Colour by <select id="cmode"><option value="3" id="cmodeTex">Map image (game)</option><option value="0">Slope (flat to steep)</option><option value="1">Height</option><option value="2">Plain</option></select></div>
   <div id="legend" style="color:var(--mut);font-size:12px"></div>
   <div class="row"><label><input type="checkbox" id="sFlags" checked>Flags</label><label><input type="checkbox" id="sSpawns" checked>Spawns</label><label><input type="checkbox" id="sExits" checked><span class="sw" style="background:#22d3ee"></span>Water exits</label><a id="ply" href="#">Export PLY</a></div>
+  <div class="row"><label title="Ground with the same material as under the parked vehicles, and where vehicles have been driven. Rough: on most maps it also covers plain ground, so it is not a road map"><input type="checkbox" id="sRoads"><span class="sw" style="background:#f1f3f5"></span>Road material (rough) <span class="sw" style="background:#74c0fc"></span>Driven <span id="roadCount"></span></label></div>
+  <div class="row"><label title="Worked out from the scan by shape, so it is a guide: it can miss some and name others wrongly"><input type="checkbox" id="sOver"><span class="sw" style="background:#ff9ff3"></span>Bridges <span class="sw" style="background:#ffa94d"></span>Beams <span class="sw" style="background:#ff4757"></span>Low (under 4.5 m) <span id="overCount"></span></label></div>
+  <div class="row"><label title="Where vehicles stand when a round starts (the bots save them while a map runs)"><input type="checkbox" id="sVehs" checked><span class="sw" style="background:#ffd43b"></span>Vehicles <span id="vehCount"></span></label><label title="The model name above each vehicle"><input type="checkbox" id="sVehNames" checked>Names</label></div>
+  <details id="vehBox"><summary style="cursor:pointer;color:var(--mut)">Vehicle list (click to fly there)</summary><div id="vehList" style="max-height:200px;overflow-y:auto;font-size:12px"></div></details>
   <div class="row"><label title="Hides the scan far outside the flags, spawns and routes"><input type="checkbox" id="crop" checked>Only the play area</label></div>
   <h3>Routes</h3>
   <div class="row">
@@ -56,7 +60,7 @@ a{color:var(--acc)}
   <div id="help">
   <b>Mouse:</b> left-drag orbit, right-drag pan, wheel zoom. <b>WASD</b> move, <b>Q/E</b> down/up, <b>Shift</b> faster, hold the <b>middle button</b> to look around. <b>T</b> top view.<br>
   <b>Select / move:</b> click a route line to select it. Click a white waypoint to pick it, then click the ground to move it there. <b>Alt+click</b> the ground inserts a waypoint after the picked one.<br>
-  <span id="helpExits"><b>Water exits:</b> click the ground at a ramp or stairs out of the water to add one, click an exit to remove it. Swimming bots head for the nearest one within 150 m.<br></span><b>Draw new:</b> click the ground to add waypoints, <b>Enter</b> finishes. Use "Hide above" to see into buildings and click lower floors.<br>
+  <span id="helpExits"><b>Water exits:</b> click the ground at a ramp or stairs out of the water to add one, click an exit to remove it. Swimming bots head for the nearest one within 150 m.<br></span><b>Routes out of an HQ or parking lot:</b> the coloured boxes are the vehicles. Pick "Vehicle network route" below, click <b>Draw new</b> and start your route right beside a vehicle.<br><b>Draw new:</b> click the ground to add waypoints, <b>Enter</b> finishes. Use "Hide above" to see into buildings and click lower floors.<br>
   <b>Branch from here:</b> pick a waypoint, press it, draw the new end - a new route that shares the start.<br><b>Del</b> deletes the picked waypoint, <b>Ctrl+Z</b> undoes, <b>Esc</b> cancels.<br>
   Saving writes the map's route files (old copies go to Thugbot_learned_backup_3d). Bots read them when the map next loads.
   </div>
@@ -85,7 +89,7 @@ const COLORS = { learn: 0xf08c00, veh: 0x20c997, planned: 0x4dabf7, sel: 0xfffff
 let surf = null, surfMat = null;
 let meta = null, cloud = null, cloudMat = null, index = null, data = null, routes = [], sel = -1, pick = -1, tool = 'sel', drawing = null;
 let dirty = { learn: false, veh: false, planned: false, exits: false }, undo = [], limits = {};
-const groups = { routes: new THREE.Group(), marks: new THREE.Group(), handles: new THREE.Group(), exits: new THREE.Group() }; Object.values(groups).forEach(g => scene.add(g));
+const groups = { routes: new THREE.Group(), marks: new THREE.Group(), handles: new THREE.Group(), roads: new THREE.Group(), over: new THREE.Group(), vehs: new THREE.Group(), exits: new THREE.Group() }; Object.values(groups).forEach(g => scene.add(g));
 const lineMats = {};
 const lmat = (color, width) => { const k = color + ':' + width; if (!lineMats[k]) { lineMats[k] = new LineMaterial({ color, linewidth: width, worldUnits: false }); lineMats[k].resolution.set(innerWidth - 300, innerHeight); if (color === COLORS.sel) lineMats[k].depthTest = false; } return lineMats[k]; };
 
@@ -119,16 +123,16 @@ async function loadMap(map) {
     for (let i = 2; i < pos.length; i += 3) pos[i] = -pos[i];
     if (cloud) { scene.remove(cloud); cloud.geometry.dispose(); } if (surf) { scene.remove(surf); surf.geometry.dispose(); surf = null; }
     const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('kind', new THREE.BufferAttribute(new Float32Array(kind), 1)); g.setAttribute('slope', new THREE.BufferAttribute(new Float32Array(slope), 1));
-    const COL = `attribute float kind; attribute float slope; uniform float ymin, ymax, cut, size, scale, mode, floorPts; uniform vec3 show; uniform vec4 box; varying vec3 vC;
+    const COL = `attribute float kind; attribute float slope; uniform float ymin, ymax, cut, size, scale, mode, floorPts; uniform vec3 show; uniform vec4 box; uniform sampler2D tex; uniform vec4 texRect; varying vec3 vC;
             vec3 ramp(float t){ return clamp(vec3(1.5-abs(4.0*t-3.0), 1.5-abs(4.0*t-2.0), 1.5-abs(4.0*t-1.0)), 0.0, 1.0); }
             bool hidden(){ float on = kind < 0.5 ? show.x : kind < 1.5 ? show.y : show.z;
               return on < 0.5 || position.y > cut || position.x < box.x || position.x > box.y || position.z < box.z || position.z > box.w; }
             vec3 colour(){ float t = clamp((position.y - ymin) / max(1.0, ymax - ymin), 0.0, 1.0);
               vec3 sl = slope < 6.0 ? vec3(0.30, 0.78, 0.36) : slope < 20.0 ? vec3(0.95, 0.85, 0.25) : slope < 35.0 ? vec3(1.0, 0.55, 0.15) : vec3(0.95, 0.2, 0.2);
-              vec3 fl = mode < 0.5 ? sl * (0.65 + 0.35 * t) : mode < 1.5 ? mix(vec3(0.35), ramp(0.3 + 0.7 * t), 0.8) : vec3(0.55 + 0.4 * t);
-              return kind < 0.5 ? fl : kind < 1.5 ? vec3(0.08, 0.2, 0.5) : mix(vec3(0.85, 0.5, 0.3), vec3(1.0), 0.15) * (0.6 + 0.4 * t); }`;
+              vec3 fl = mode < 0.5 ? sl * (0.65 + 0.35 * t) : mode < 1.5 ? mix(vec3(0.35), ramp(0.3 + 0.7 * t), 0.8) : mode < 2.5 ? vec3(0.55 + 0.4 * t) : texture2D(tex, vec2((position.x - texRect.x) / texRect.z, 1.0 - (-position.z - texRect.y) / texRect.w)).rgb * 1.35;
+              return kind < 0.5 ? fl : kind < 1.5 ? (mode > 2.5 ? fl : vec3(0.08, 0.2, 0.5)) : mix(vec3(0.85, 0.5, 0.3), vec3(1.0), 0.15) * (0.6 + 0.4 * t); }`;
     cloudMat = cloudMat || new THREE.ShaderMaterial({
-        uniforms: { ymin: { value: 0 }, ymax: { value: 1 }, cut: { value: 1e9 }, size: { value: 4 }, show: { value: new THREE.Vector3(1, 1, 1) }, scale: { value: 500 }, mode: { value: +$('cmode').value }, floorPts: { value: 0 }, box: { value: new THREE.Vector4(-1e9, 1e9, -1e9, 1e9) } },
+        uniforms: { ymin: { value: 0 }, ymax: { value: 1 }, cut: { value: 1e9 }, size: { value: 4 }, show: { value: new THREE.Vector3(1, 1, 1) }, scale: { value: 500 }, mode: { value: +$('cmode').value }, floorPts: { value: 0 }, box: { value: new THREE.Vector4(-1e9, 1e9, -1e9, 1e9) }, texLines: { value: 0 }, tex: { value: null }, texRect: { value: new THREE.Vector4(0, 0, 1, 1) } },
         vertexShader: COL + `
             void main(){ if (hidden() || (floorPts < 0.5 && kind < 1.5)) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
               vC = colour(); vec4 mv = modelViewMatrix * vec4(position, 1.0); gl_Position = projectionMatrix * mv;
@@ -136,10 +140,10 @@ async function loadMap(map) {
         fragmentShader: `varying vec3 vC; void main(){ gl_FragColor = vec4(vC, 1.0); }` });
     // the floor surface: lit from above-ish so slopes and steps read as shading
     surfMat = surfMat || new THREE.ShaderMaterial({ uniforms: cloudMat.uniforms, side: THREE.DoubleSide,
-        vertexShader: COL + ` varying float vHide;
-            void main(){ vHide = hidden() ? 1.0 : 0.0; vec3 n = normalize(normal); float lit = 0.35 + 0.65 * abs(dot(n, normalize(vec3(0.45, 1.0, 0.3))));
-              vC = colour() * lit; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-        fragmentShader: `varying vec3 vC; varying float vHide; void main(){ if (vHide > 0.01) discard; gl_FragColor = vec4(vC, 1.0); }`,
+        vertexShader: COL + ` varying float vHide; varying vec2 vUv; varying float vLit; varying float vFloor;
+            void main(){ vHide = hidden() ? 1.0 : 0.0; vFloor = kind < 1.5 ? 1.0 : 0.0; vUv = vec2((position.x - texRect.x) / texRect.z, 1.0 - (-position.z - texRect.y) / texRect.w); vec3 n = normalize(normal); float lit = 0.35 + 0.65 * abs(dot(n, normalize(vec3(0.45, 1.0, 0.3))));
+              vLit = lit; vC = colour() * lit; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+        fragmentShader: `uniform sampler2D tex; uniform float mode, texLines; varying vec3 vC; varying float vHide; varying vec2 vUv; varying float vLit; varying float vFloor; void main(){ if (vHide > 0.01) discard; vec3 c = vC; if (mode > 2.5 && vFloor > 0.5) { vec3 t = texture2D(tex, vUv).rgb; c = texLines > 0.5 ? mix(vec3(0.20, 0.23, 0.21) * vLit, vec3(1.0, 0.95, 0.75), clamp(t.r * 2.5, 0.0, 1.0)) : t * 1.35 * vLit; } gl_FragColor = vec4(c, 1.0); }`,
         polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
     cloud = new THREE.Points(g, cloudMat); scene.add(cloud);
     if (meta.tris) {
@@ -159,6 +163,18 @@ async function loadMap(map) {
     index = { start: cnt, hs };
     cloudMat.uniforms.ymin.value = meta.ymin; cloudMat.uniforms.ymax.value = meta.ymax; cloudMat.uniforms.mode.value = +$('cmode').value;
     $('cut').value = 1000; setCut();
+    {   // the map's own image, where it was read from the game files; slope colours otherwise
+        const ti = await (await fetch('/api/texinfo?map=' + map)).json().catch(() => null);
+        $('cmodeTex').disabled = !ti;
+        if (ti) {
+            cloudMat.uniforms.tex.value = await new THREE.TextureLoader().loadAsync('/api/teximg?map=' + map);
+            cloudMat.uniforms.texRect.value.set(ti.x0, ti.z0, ti.x1 - ti.x0, ti.z1 - ti.z0); cloudMat.uniforms.texLines.value = ti.lines ? 1 : 0;
+            if ($('cmode').value === '3' && $('sWall').checked) { $('sWall').checked = false; cloudMat.uniforms.show.value.z = 0; }   // (the walls hide the image: back on with the Walls box)
+            cloudMat.uniforms.tex.value.colorSpace = THREE.NoColorSpace;
+            cloudMat.needsUpdate = true;
+        } else if ($('cmode').value === '3') $('cmode').value = '0';
+        cloudMat.uniforms.mode.value = +$('cmode').value; legend();
+    }
     $('ply').href = '/api/ply?map=' + map;
     data = await (await fetch('/api/routes?map=' + map)).json();
     routes = [...data.learn.map(r => ({ type: 'learn', ...r })), ...data.veh.map(r => ({ type: 'veh', ...r })), ...data.planned.map(r => ({ type: 'planned', ...r }))];
@@ -166,7 +182,7 @@ async function loadMap(map) {
     sel = pick = -1; drawing = null; undo = []; dirty = { learn: false, veh: false, planned: false, exits: false };
     $('warn').style.display = data.live ? 'block' : 'none';
     $('warn').textContent = 'This map is running on the server now. Bots load route files when a map starts, and the server can write over the learned file while the map runs, so save after the round changes, or save and then change map.';
-    playArea(); buildMarks(); buildExits(); rebuildRoutes(); topView(); updateUI();
+    playArea(); buildMarks(); buildRoads(map); overFor = null; groups.over.clear(); $('overCount').textContent = ''; buildOver(); buildVehicles(); buildExits(); rebuildRoutes(); topView(); updateUI();
     $('load').style.display = 'none';
     msg(`${map}: ${(meta.count / 1e6).toFixed(2)} M scan points, ${routes.length} routes.`);
 }
@@ -209,6 +225,65 @@ function buildMarks() {
     });
     showMarks();
 }
+// the vehicles where they stand at round start: a box the size of the vehicle, a pole so it shows from far up, the name
+const VEH_COLORS = { air: 0xc77dff, boat: 0x22d3ee, tank: 0xff6b6b, ground: 0xffd43b };
+const vehKind = n => { const l = n.toLowerCase(); return /heli|jet|plane|\.air/.test(l) && !/jetski/.test(l) ? 'air' : /boat|jetski|cat_|hovercraft|\.acv|rhib|pwc/.test(l) ? 'boat' : /tank|ifv|apc|\.mbt|armou?red/.test(l) ? 'tank' : 'ground'; };
+const vehShort = n => n.replace(/^vehicles\./i, '');
+function vehLabel(text, color, p) { const cv = document.createElement('canvas'); cv.width = 384; cv.height = 64; const x = cv.getContext('2d'); x.font = 'bold 34px system-ui'; x.fillStyle = color; x.strokeStyle = '#000'; x.lineWidth = 6; x.strokeText(text, 8, 44); x.fillText(text, 8, 44); const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(cv), depthTest: false, sizeAttenuation: false })); s.scale.set(0.18, 0.03, 1); s.center.set(0, 0.5); s.position.copy(p); s.renderOrder = 9; s.userData.name = true; return s; }
+const vehDotTex = (() => { const cv = document.createElement('canvas'); cv.width = cv.height = 32; const x = cv.getContext('2d'); x.fillStyle = '#fff'; x.beginPath(); x.arc(16, 16, 13, 0, 7); x.fill(); x.lineWidth = 4; x.strokeStyle = '#000'; x.stroke(); return new THREE.CanvasTexture(cv); })();
+// where the roads are: light points on the ground, blue where vehicles were driven
+async function buildRoads(map) {
+    groups.roads.clear(); $('roadCount').textContent = '';
+    let buf; try { buf = await (await fetch('/api/roads?map=' + map)).arrayBuffer(); } catch (e) { return; }
+    if (!meta || meta.map !== map || buf.byteLength < 8) return;
+    const [ns, nt] = new Uint32Array(buf, 0, 2), f = new Float32Array(buf, 8, (ns + nt) * 3);
+    const P = new Float32Array(f.length), C = new Float32Array(f.length), a = new THREE.Color(0xf1f3f5), b = new THREE.Color(0x74c0fc);
+    for (let i = 0; i < ns + nt; i++) { const c = i < ns ? a : b; P[i * 3] = f[i * 3]; P[i * 3 + 1] = f[i * 3 + 1] + 0.4; P[i * 3 + 2] = -f[i * 3 + 2]; C[i * 3] = c.r; C[i * 3 + 1] = c.g; C[i * 3 + 2] = c.b; }
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(P, 3)); g.setAttribute('color', new THREE.BufferAttribute(C, 3));
+    groups.roads.add(new THREE.Points(g, new THREE.PointsMaterial({ size: 2.2, vertexColors: true, sizeAttenuation: true })));
+    groups.roads.visible = $('sRoads').checked;
+    $('roadCount').textContent = ns + nt ? '' : '(not scanned yet)';
+}
+$('sRoads').onchange = () => groups.roads.visible = $('sRoads').checked;
+// bridges and beams: their surface as points over the scan (fetched the first time the box is ticked: it takes a few seconds)
+let overFor = null;
+async function buildOver() {
+    groups.over.visible = $('sOver').checked;
+    if (!$('sOver').checked || !meta || overFor === meta.map) return;
+    const map = meta.map; overFor = map; groups.over.clear(); $('overCount').textContent = '(looking…)';
+    const items = await (await fetch('/api/overhead?map=' + map)).json();
+    if (!meta || meta.map !== map) return;
+    const col = { bridge: new THREE.Color(0xff9ff3), beam: new THREE.Color(0xffa94d), low: new THREE.Color(0xff4757) }, P = [], C = [];
+    let bridges = 0, beams = 0;
+    for (const it of items) {
+        if (it.kind === 'bridge') bridges++; else beams++;
+        for (let k = 0; k < it.pts.length; k += 4) { P.push(it.pts[k], it.pts[k + 1] + 0.3, -it.pts[k + 2]); const c = it.pts[k + 3] ? col.low : col[it.kind]; C.push(c.r, c.g, c.b); }
+    }
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3)); g.setAttribute('color', new THREE.Float32BufferAttribute(C, 3));
+    groups.over.add(new THREE.Points(g, new THREE.PointsMaterial({ size: 2, vertexColors: true, sizeAttenuation: true })));
+    $('overCount').textContent = '(' + bridges + ' / ' + beams + ')';
+}
+$('sOver').onchange = buildOver;
+function buildVehicles() {
+    groups.vehs.clear(); if (!data) return;
+    const vs = data.vehicles || [];
+    vs.forEach(v => {
+        const k = vehKind(v.name), col = VEH_COLORS[k], mat = new THREE.MeshBasicMaterial({ color: col });
+        const size = k === 'air' ? [4, 3, 11] : k === 'boat' ? [3, 2, 8] : k === 'tank' ? [3.6, 2.4, 7] : [2.2, 1.7, 4.8];
+        const box = new THREE.Mesh(new THREE.BoxGeometry(...size), mat); box.position.copy(T(v.p, size[1] / 2)); box.rotation.y = Math.PI - v.yaw; groups.vehs.add(box);
+        const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 8), mat); pole.position.copy(T(v.p, size[1] + 4)); groups.vehs.add(pole);
+        const dot = new THREE.Sprite(new THREE.SpriteMaterial({ map: vehDotTex, color: col, depthTest: false, sizeAttenuation: false })); dot.scale.set(0.022, 0.022, 1); dot.position.copy(T(v.p, size[1] + 8)); dot.renderOrder = 9; groups.vehs.add(dot);
+        groups.vehs.add(vehLabel(vehShort(v.name), '#' + col.toString(16).padStart(6, '0'), T(v.p, size[1] + 8)));
+    });
+    groups.vehs.visible = $('sVehs').checked; vehNames();
+    $('vehCount').textContent = vs.length ? '(' + vs.length + ')' : '(none saved yet)';
+    const el = $('vehList'); el.innerHTML = vs.length ? '' : 'None yet: the bots save them while this map runs.';
+    vs.slice().sort((a, b) => a.name.localeCompare(b.name)).forEach(v => {
+        const d = document.createElement('div'); d.innerHTML = '<span class="sw" style="background:#' + VEH_COLORS[vehKind(v.name)].toString(16).padStart(6, '0') + '"></span> ' + vehShort(v.name) + ' · ' + v.p[0].toFixed(0) + ', ' + v.p[2].toFixed(0) + (v.seen > 1 ? ' · seen ' + v.seen + 'x' : '');
+        d.onclick = () => { controls.target.copy(T(v.p)); camera.position.copy(T(v.p).add(new THREE.Vector3(0, 70, 45))); }; el.appendChild(d);
+    });
+}
+function vehNames() { groups.vehs.children.forEach(o => { if (o.userData.name) o.visible = $('sVehNames').checked; }); }
 function buildExits() {
     groups.exits.clear(); if (!data) return;
     const geo = new THREE.ConeGeometry(1.2, 3, 12), mat = new THREE.MeshBasicMaterial({ color: 0x22d3ee });
@@ -264,7 +339,7 @@ function focusRoute(r) { const b = new THREE.Box3(); r.pts.forEach(p => b.expand
 let play = null;
 function playArea() {
     let x0 = 1e9, x1 = -1e9, z0 = 1e9, z1 = -1e9; const add = (x, z) => { x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); };
-    data.flags.forEach(f => add(f.x, f.z)); data.spawnList.forEach(s => add(s.p[0], s.p[2])); routes.forEach(r => r.pts.forEach(p => add(p[0], p[2])));
+    data.flags.forEach(f => add(f.x, f.z)); data.spawnList.forEach(s => add(s.p[0], s.p[2])); (data.vehicles || []).forEach(v => add(v.p[0], v.p[2])); routes.forEach(r => r.pts.forEach(p => add(p[0], p[2])));
     play = x1 > x0 ? { x0: x0 - 120, x1: x1 + 120, z0: z0 - 120, z1: z1 + 120 } : null;
     {   // colour ramp from the play area's heights (the sea floor stretched it); the whole map when there is no play area
         const P = play || { x0: meta.x0, x1: meta.x0 + meta.w * meta.cell, z0: meta.z0, z1: meta.z0 + meta.h * meta.cell }; const hs = []; for (let cz = Math.max(0, Math.floor((P.z0 - meta.z0) / meta.cell)); cz < Math.min(meta.h, (P.z1 - meta.z0) / meta.cell); cz += 2) for (let cx = Math.max(0, Math.floor((P.x0 - meta.x0) / meta.cell)); cx < Math.min(meta.w, (P.x1 - meta.x0) / meta.cell); cx += 2) { const c = cz * meta.w + cx; for (let k = index.start[c]; k < index.start[c + 1]; k++) hs.push(index.hs[k]); }
@@ -395,7 +470,7 @@ $('rev').onclick = () => { if (sel < 0) return; snapshot(); const r = routes[sel
 const sw = c => '<span class="sw" style="background:' + c + '"></span> ';
 function legend() {
     const m = +$('cmode').value; if (cloudMat) cloudMat.uniforms.mode.value = m;
-    $('legend').innerHTML = (m === 0 ? sw('#4dc75c') + 'flat (under 6°) ' + sw('#f2d940') + 'gentle slope / stairs ' + sw('#ff8c26') + 'steep ' + sw('#f23333') + 'very steep / ledge (35°+). Brighter = higher up.'
+    $('legend').innerHTML = (m === 3 ? "The map's own top-down image, from your game files. Roads show as they do in game." : m === 0 ? sw('#4dc75c') + 'flat (under 6°) ' + sw('#f2d940') + 'gentle slope / stairs ' + sw('#ff8c26') + 'steep ' + sw('#f23333') + 'very steep / ledge (35°+). Brighter = higher up.'
         : m === 1 ? sw('#00b3ff') + 'low ' + sw('#40ff80') + sw('#ffe040') + sw('#ff3020') + 'high (within the play area)' : 'Grey, brighter = higher up.')
         + '<br>' + sw('#14337f') + 'water ' + sw('#c47a52') + 'walls / blocked edges';
 }
@@ -437,6 +512,7 @@ $('cut').oninput = setCut;
 $('psize').oninput = () => cloudMat && (cloudMat.uniforms.size.value = +$('psize').value);
 ['sFloor', 'sWater', 'sWall'].forEach(id => $(id).onchange = () => cloudMat && cloudMat.uniforms.show.value.set(+$('sFloor').checked, +$('sWater').checked, +$('sWall').checked));
 ['sFlags', 'sSpawns'].forEach(id => $(id).onchange = showMarks);
+$('sVehs').onchange = () => groups.vehs.visible = $('sVehs').checked; $('sVehNames').onchange = vehNames;
 $('sExits').onchange = () => groups.exits.visible = $('sExits').checked;
 ['rlearn', 'rveh', 'rplanned'].forEach(id => $(id).onchange = rebuildRoutes);
 

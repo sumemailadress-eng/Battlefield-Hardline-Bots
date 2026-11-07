@@ -1,4 +1,7 @@
 // Thugbot helicopters (included by brain.inc after drive.inc): bots that sit in a helicopter's pilot seat.
+// Ported from FloodBots drive_test\src\heli.inc 2026-11-06 (THUGBOT_HELI_PORT, ini HeliFly). Left out on purpose: remote seat
+// switching / enterEntry (BF4 crashes, no control) - pilots only come from the game's spawn into a vehicle or walking up + E;
+// transport drops (they need Hardline's exit call and entry list); the dead rocket picker; BF4's spawner hook.
 //
 //   "heli 0": pilots get out (the old behaviour). "heli 1": control probe - every pilot runs the same input script
 //   (throttle, yaw, strafe, roll, pitch, brake: 2.5 s each) and the log shows what each input did to height, heading
@@ -9,8 +12,7 @@ static int gun_ortho(const float *m);   // gunner.inc
 static void heli_deepscan(void *v, const float *ground, float agl);
 typedef struct Heli { void *veh; ULONGLONG startAt, phaseAt; int phase; float p0[3], yaw0, up0[3], lastFwd; int spunUp; float lastP[3]; ULONGLONG logAt, checkAt; float logP[3], moved; } Heli;
 static Heli g_heli[MAX_BOTS];
-
-static int vehicle_is_aircraft(const char *nm) { return strstr(nm, "HELI") || strstr(nm, "Heli") || strstr(nm, "JET") || strstr(nm, "PLANE"); }
+static int vehicle_is_aircraft(const char *nm) { return name_is_air(nm); }
 
 static const char *kHeliPhase[] = { "nothing", "fwd +1", "fwd +1 turn +1", "fwd +1 strafe +1", "fwd +1 yaw(hook) +1", "fwd +1 roll(hook) +1", "fwd +1 pitch(hook) +1", "fwd -1", "fwd +1 pitch(hook) -1", "throttle(hook) +1", "fwd +1 jump" };
 #define HELI_PHASES 11
@@ -124,29 +126,40 @@ static void heli_deepscan(void *v, const float *ground, float agl)
 // against the turn rate it caused, 1.5 s windows) and flips its sign when it made things worse.
 // Attack helicopter pilots fire the nose guns at an enemy within 150 m, ahead and in line (and turn to one in 80 m).
 #define HELI_CRUISE_UP 35.0f
-typedef struct HeliCtl { float sign[3], acc[3], prev[3]; ULONGLONG winAt, lastAt; float lastY, vy; int flips[3]; } HeliCtl;
+static int g_heliFlip = 0;   // "heliflip 1": each axis may correct its sign once. Off: a bad reading flipped yaw 1 s into a flight and it spun in (2026-11-06)
+typedef struct HeliCtl { float rateYaw, yawRate; ULONGLONG rateAt; float sign[3], acc[3], prev[3]; ULONGLONG winAt, lastAt; float lastY, vy, lastX, lastZ, vx, vz; int flips[3]; } HeliCtl;
 static HeliCtl g_hctl[MAX_BOTS];
 static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
 {
     HeliCtl *c = &g_hctl[i];
+    // Only the engine's own transform is flown on. The matrix search can hand back a copy or a point on the ground under the
+    // helicopter: flying on that gave full throttle and full yaw on phantom errors. No engine transform: stays on the ground,
+    // controls neutral, and the no-control check lets the pilot out.
     const float *m = vehicle_engine_xf(v);
-    if (!m) m = vehicle_xf(v);
-    if (!m) return;
-    if (t - h->startAt < 50 || !c->winAt) { memset(c, 0, sizeof *c); c->sign[0] = c->sign[1] = c->sign[2] = 1; c->winAt = t; c->lastAt = t; c->lastY = m[13]; }
+    if (!m) { static unsigned nl; if (nl++ < 20) H->log("heli: %s - no engine transform: stays on the ground", vehicle_name(v)); b->heliPilot = 1; return; }
+    if (t - h->startAt < 50 || !c->winAt) { memset(c, 0, sizeof *c); c->sign[0] = -1; c->sign[1] = -1; c->sign[2] = 1;   /* (yaw -1: on Hardline +1 turn lowers the heading. Pitch -1: log 2026-11-06 18:01 - asked for nose up at +1, 32 of 43 flights went past 40 deg nose down. Roll +1: not settled by the log) */ c->winAt = t; c->lastAt = t; c->lastY = m[13]; c->lastX = m[12]; c->lastZ = m[14]; }
     const float *p = m + 12;
+    {   // the reading jumped: not trusted this frame
+        float jx = p[0] - c->lastX, jy = p[1] - c->lastY, jz = p[2] - c->lastZ;
+        if (jx * jx + jy * jy + jz * jz > 3600) {
+            static unsigned jl; if (jl++ < 20) H->log("heli: %s - its position jumped %.0f m: controls neutral this frame", vehicle_name(v), sqrtf(jx * jx + jy * jy + jz * jz));
+            c->lastX = p[0]; c->lastY = p[1]; c->lastZ = p[2]; c->lastAt = t; b->heliPilot = 1; return;
+        }
+    }
     float dt = (t - c->lastAt) / 1000.0f;
-    if (dt > 0.05f) { c->vy = c->vy * 0.7f + 0.3f * (p[1] - c->lastY) / dt; c->lastY = p[1]; c->lastAt = t; }
+    if (dt > 0.05f) { c->vy = c->vy * 0.7f + 0.3f * (p[1] - c->lastY) / dt; c->vx = c->vx * 0.7f + 0.3f * (p[0] - c->lastX) / dt; c->vz = c->vz * 0.7f + 0.3f * (p[2] - c->lastZ) / dt; c->lastX = p[0]; c->lastZ = p[2]; c->lastY = p[1]; c->lastAt = t; }
     float yaw = atan2f(m[8], m[10]), pitch = asinf(fmaxf(-1, fminf(1, m[9]))), roll = asinf(fmaxf(-1, fminf(1, m[1])));
     choose_target(i, b, team, p);
     float aim[3]; memcpy(aim, b->target, 12);
     // an enemy near: attack helicopters go for it
-    int attack = strstr(vehicle_name(v), "ATTACK") != NULL, firing = 0;
+    const char *category = vehicle_name(v);
+    int attack = strstr(category, "ATTACK") || strstr(category, "attack") || strstr(category, "scout") || strstr(category,"SCOUT"), firing = 0;
     float ground = p[1] - 200;
     { float a[3] = { p[0], p[1] - 2, p[2] }, e[3] = { p[0], p[1] - 300, p[2] }, hh[3]; if (ray_cast(a, e, hh, NULL)) ground = hh[1]; }
     float want = fmaxf(aim[1] + HELI_CRUISE_UP, ground + 25);
     float dist = dist2d(p, aim);
     if (attack) {
-        float best = 150;
+        float best = 1e9f;
         for (int j = 0; j < g_playerCount; j++) {
             void *pl = g_players[j];
             int pt = FIELD(pl, OFF_PLAYER_TEAM, int);
@@ -155,18 +168,63 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
             if (ev) { const float *qq = veh_pos(ev); if (!qq) continue; memcpy(q, qq, 12); }
             else { void *s = bot_soldier(pl); if (!s) continue; memcpy(q, soldier_pos(s), 12); q[1] += 1; }
             float d = sqrtf((q[0] - p[0]) * (q[0] - p[0]) + (q[1] - p[1]) * (q[1] - p[1]) + (q[2] - p[2]) * (q[2] - p[2]));
-            if (d >= best) continue;
+            // (the tester 2026-10-29: "helicopters fight each other") an enemy aircraft out to 300 m comes first (scored 200 m
+            // nearer), then anything within 150 m
+            int air = ev && name_is_air(vehicle_name(ev));
+            float range = air ? 500 : 300, score = d - (air ? 400 : 0);   /* (the tester 2026-10-30: "increase their range" - infantry / ground 300 m, was 150) */
+            if (d < 0.5f || d > range || score >= best) continue;
             float s0[3] = { p[0] + (q[0] - p[0]) / d * 4, p[1] + (q[1] - p[1]) / d * 4, p[2] + (q[2] - p[2]) / d * 4 };
             if (!clear_line(s0, q)) continue;
-            best = d; memcpy(aim, q, 12); firing = 1;
+            best = score; memcpy(aim, q, 12); firing = 1;
         }
         if (firing) { dist = dist2d(p, aim); want = fmaxf(fminf(want, aim[1] + 25), ground + 15); }
     }
     float yawErr = wrap_pi(atan2f(aim[0] - p[0], aim[2] - p[2]) - yaw);
+    // Towers, cranes, cliffs (the tester 2026-10-29: "pilots should avoid towers or anything really high"): three rays 80 m
+    // ahead along the nose (level, and 8 m / 16 m below it) - something there: climb over it and hold the nose level
+    // until clear; the climb aims 15 m over the highest point the rays found.
+    int blockedAhead = 0;
+    {
+        // (the tester 2026-10-30: "choppers hit buildings instead of navigating between buildings" - only the nose line was
+        // looked along; a helicopter sliding sideways or turning met the building beside it) also 25 degrees either side
+        // of the nose and along the way it is actually moving
+        float top = -1e9f, sp = sqrtf(c->vx * c->vx + c->vz * c->vz);
+        float dirs[4] = { yaw, yaw + 0.45f, yaw - 0.45f, sp > 3 ? atan2f(c->vx, c->vz) : yaw };
+        for (int k = 0; k < 12; k++) {
+            float hx = sinf(dirs[k / 3]), hz = cosf(dirs[k / 3]), len = k / 3 == 3 ? fmaxf(60, sp * 5) : 80;
+            float a[3] = { p[0] + hx * 10, p[1] - (k % 3) * 8.0f, p[2] + hz * 10 }, e[3] = { a[0] + hx * len, a[1], a[2] + hz * len }, hh[3];
+            if (ray_cast(a, e, hh, NULL)) {
+                blockedAhead = 1;
+                float u0[3] = { hh[0] + hx * 2, hh[1] + 80, hh[2] + hz * 2 }, u1[3] = { u0[0], hh[1] - 1, u0[2] }, top0[3];
+                if (ray_cast(u0, u1, top0, NULL) && top0[1] > top) top = top0[1];
+                else if (hh[1] + 20 > top) top = hh[1] + 20;
+            }
+        }
+        if (blockedAhead) { want = fmaxf(want, top + 20); static unsigned tl; if (tl++ < 20) H->log("heli: %s - something tall ahead (top %.0f): climbing to %.0f", vehicle_name(v), top, want); }
+    }
     float tiltWant = t - h->startAt < 5000 ? 0 : dist > 80 ? -0.35f : dist > 30 ? -0.35f * (dist - 30) / 50 : 0.05f;
-    if (firing) tiltWant = fmaxf(-0.6f, fminf(0.3f, atan2f(aim[1] - p[1], fmaxf(1, dist)) * 0.8f));   // nose at it
-    float rollWant = fabsf(yawErr) > 0.3f ? (yawErr > 0 ? 0.12f : -0.12f) : 0;
-    float u[3] = { fmaxf(-1, fminf(1, yawErr * 2.0f)), fmaxf(-1, fminf(1, (tiltWant - pitch) * 4.0f)), fmaxf(-1, fminf(1, (rollWant - roll) * 4.0f)) };
+    if (!firing && t - h->startAt >= 5000) tiltWant = fmaxf(-0.35f, fminf(0.22f, -dist * 0.006f + (c->vx * sinf(yaw) + c->vz * cosf(yaw)) * 0.055f));
+    if (!firing) tiltWant *= fmaxf(0, 1 - fabsf(yawErr) / 1.5f);   // (AltBotMod: no nose-down while turning hard)
+    if (firing) tiltWant = fmaxf(-0.7f, fminf(0.3f, atan2f(aim[1] - p[1], fmaxf(1, dist))));   // nose at it (the full angle: x0.8 aimed short)
+    if (fabsf(yawErr) > 1.2f) tiltWant = 0.03f;
+    // (the tester 2026-10-29: "helicopters crashed all around - they should go up vertically first") straight up off the pad
+    // until 20 m clear of the ground (and near the cruise height) - no nose-down before that
+    int climbFirst = 0;
+    if (p[1] < fmaxf(ground + 20, want - 12)) { tiltWant = 0.02f; climbFirst = t - h->startAt < 20000 && !firing; }
+    if (blockedAhead && want > p[1] + 3) tiltWant = 0.05f;   // (no flying into it while climbing over)   // (facing well away: hover and turn first - a transport flew off the map nose-first, yaw err 3.0, 2026-10-29)
+    // Nose down is limited to 15 degrees, and past that it only pulls up (the tester 2026-11-06: "pitch forward enough to crash")
+    tiltWant = fmaxf(-0.26f, tiltWant);
+    if (pitch < -0.26f) tiltWant = 0.05f;
+    int holdLevel = t - h->startAt < 5000 || climbFirst || p[1] < ground + 20;   // off the pad and until 20 m clear of the ground: straight up and level, no turning
+    if (holdLevel) tiltWant = fmaxf(tiltWant, 0.02f);
+    float rollWant = !holdLevel && fabsf(yawErr) > 0.3f ? (yawErr > 0 ? 0.12f : -0.12f) : 0;
+    float yawRate = wrap_pi(yaw - c->prev[0]);   // (per frame - damping: AltBotMod's yaw PID)
+    float u[3] = { fmaxf(-1, fminf(1, yawErr * 1.5f - yawRate * 2.0f)), fmaxf(-1, fminf(1, (tiltWant - pitch) * 4.0f)), fmaxf(-1, fminf(1, (rollWant - roll) * 4.0f)) };
+    // limits: gentle inputs; spinning or tipped over: no more yaw until it settles
+    if (!c->rateAt) { c->rateAt = t; c->rateYaw = yaw; }
+    else if (t - c->rateAt >= 50) { c->yawRate = wrap_pi(yaw - c->rateYaw) / ((t - c->rateAt) / 1000.0f); c->rateYaw = yaw; c->rateAt = t; }
+    u[0] = fmaxf(-0.6f, fminf(0.6f, u[0])); u[1] = fmaxf(-0.6f, fminf(0.6f, u[1])); u[2] = fmaxf(-0.25f, fminf(0.25f, u[2]));
+    if (holdLevel || fabsf(c->yawRate) > 1.5f || fabsf(roll) > 0.6f || fabsf(pitch) > 0.9f) u[0] = 0;
     float now3[3] = { yaw, pitch, roll };
     // self-check: input u (wanting the angle to go up when positive) against how the angle went
     for (int k = 0; k < 3; k++) {
@@ -175,17 +233,36 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
     }
     if (t - c->winAt > 1500) {
         static const char *nm[3] = { "yaw", "pitch", "roll" };
-        for (int k = 0; k < 3; k++) if (c->acc[k] < -0.05f && c->flips[k] < 6) { c->sign[k] = -c->sign[k]; c->flips[k]++; H->log("heli: %s - %s input turned it the wrong way: sign now %+.0f", vehicle_name(v), nm[k], c->sign[k]); }
+        // (2026-10-29: "a chopper is just spinning in the air" - the yaw sign flipped back and forth on noise during attacks and
+        // ended up wrong: a runaway spin) each axis may flip once, on clear evidence only - AltBotMod calibrates its signs once too
+        { static unsigned sl; if (sl++ < 80) H->log("heli: %s axis check yaw %.2f pitch %.2f roll %.2f (negative: that axis has the wrong sign), yaw rate %.2f", vehicle_name(v), c->acc[0], c->acc[1], c->acc[2], c->yawRate); }
+        for (int k = 0; g_heliFlip && k < 3; k++) if (c->acc[k] < -0.3f && c->flips[k] < 1) { c->sign[k] = -c->sign[k]; c->flips[k]++; H->log("heli: %s - %s input turned it the wrong way: sign now %+.0f", vehicle_name(v), nm[k], c->sign[k]); }
+        // Pitch and roll may correct their sign once, only early in a flight on the engine's transform and only when already tilted that way: a wrong
+        // sign is a crash within seconds. (Yaw never: a flip on a bad reading spun one in.)
+        for (int k = 1; k <= 2; k++) if (c->acc[k] < -0.25f && c->flips[k] < 1 && t - h->startAt < 12000 && fabsf(now3[k]) > 0.15f) { c->sign[k] = -c->sign[k]; c->flips[k]++; H->log("heli: %s - %s input worked against it at %.2f: sign now %+.0f", vehicle_name(v), nm[k], now3[k], c->sign[k]); }
         c->acc[0] = c->acc[1] = c->acc[2] = 0; c->winAt = t;
     }
     b->yawIn = c->sign[0] * u[0];
+    b->turn = b->yawIn;   // (the soldier turn input as well: on some helicopters the yaw axis alone did nothing. Same sign here: BF4's core flips turn in vehicles, Hardline's doesn't; both land on EIAYaw)
     b->pitch = c->sign[1] * u[1];
     b->roll = c->sign[2] * u[2];
     float dy = want - p[1];
     float thr = t - h->startAt < 4000 ? 1 : fmaxf(0, fminf(1, 0.45f + dy * 0.08f - c->vy * 0.25f));
     b->fwd = thr;   // EIAThrottle (collective)
+    b->heliPilot = 1;
+    if (climbFirst) b->fwd = 1;   /* (full collective until clear) */
     if (dy < -20 && c->vy > -3) b->fwd = -0.5f;   // far too high: brake (down)
-    if (firing && fabsf(yawErr) < 0.12f && fabsf(tiltWant - pitch) < 0.15f) b->buttons |= BTN_FIRE;
+    // Pilot weapons (simple, replacing the patch's rocket picker - the tester: "attack helis don't shoot rockets"): nose roughly on
+    // the target (0.3 rad) - fire in bursts, 1.1 s on / 0.4 s off; the weapon swaps every 6 s between slot 1 (guns) and
+    // slot 2 (rockets) with a select press at the start of each spell
+    // (the tester 2026-10-30: "choppers can't hit the broad side of a barn") fire only with the nose within ~5 m of the target
+    // sideways (0.3 rad was 60 m off at 200 m) and within 0.1 rad of its elevation
+    float yawTol = fmaxf(0.03f, atanf(5.0f / fmaxf(dist, 1)));
+    if (attack && firing && fabsf(yawErr) < yawTol && fabsf(tiltWant - pitch) < 0.1f) {
+        ULONGLONG ph = t % 12000;
+        if (ph < 200) b->buttons |= BTN_WEAPON1; else if (ph >= 6000 && ph < 6200) b->buttons |= BTN_WEAPON2;
+        else if ((t % 1500) < 1100) b->buttons |= BTN_FIRE;
+    }
     static unsigned traced;
     if (t - h->logAt > 3000 && traced++ < 300) {
         h->logAt = t;
@@ -200,15 +277,16 @@ static void combat_tick_vehicle(int i, Bot *b, void *v, int team, int seat) { gu
 static int heli_think(int i, Bot *b, void *v, int seat, int team)
 {
     if (!g_heliMode) return 0;
+    { const char *nm0 = vehicle_name(v); if (strstr(nm0, "JET") || strstr(nm0, "PLANE") || strstr(nm0, "jet") || strstr(nm0, "plane")) return 0; }   // jets are never flown (the control probe flew one into a hill, 2026-10-27)
     ULONGLONG t = now_ms();
     Heli *h = &g_heli[i];
     if (h->veh != v) {
         memset(h, 0, sizeof *h); h->veh = v; h->startAt = t;
         int k = veh_xf_index(v);
-        H->log("heli: %s gets in %s seat %d", (char *)b->player + OFF_PLAYER_NAME, vehicle_name(v), seat);
+        H->log("heli: %s gets in %s seat %d (%s)", (char *)b->player + OFF_PLAYER_NAME, vehicle_name(v), seat, b->takingAt && t - b->takingAt < 8000 ? "walked up, E" : "spawned in");
         {   // the physics part cars keep their matrix in ([+0x208]+0x80): what a helicopter's holds (quaternion + position?)
             const float *pb = vehicle_body(v) ? (const float *)vehicle_body(v) : NULL;
-            if (pb && !IsBadReadPtr(pb, 0x300)) for (int r = 0; r < 0x300 / 4; r += 8)
+            static unsigned dumps; if (pb && dumps++ < 4 && !IsBadReadPtr(pb, 0x300)) for (int r = 0; r < 0x300 / 4; r += 8)
                 H->log("heli: [+0x208]+%#05x %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f", r * 4, pb[r], pb[r + 1], pb[r + 2], pb[r + 3], pb[r + 4], pb[r + 5], pb[r + 6], pb[r + 7]);
             void *rs = FIELD(b->player, 0x1648, void *);
             if (rs && !IsBadReadPtr(rs, 0x400)) { const float *sp = soldier_pos(rs); H->log("heli: pilot soldier at %.1f %.1f %.1f, bot last stood at %.1f %.1f %.1f", sp[0], sp[1], sp[2], b->lastPos[0], b->lastPos[1], b->lastPos[2]); }
@@ -223,7 +301,7 @@ static int heli_think(int i, Bot *b, void *v, int seat, int team)
     {
         const float *p = veh_pos(v);
         if (p && t - h->checkAt > 4000) {
-            if (h->checkAt && FIELD(v, 0x168, float) > 8 && dist2d(p, h->lastP) < 1 && fabsf(p[1] - h->lastP[1]) < 1) {
+            if (!vehicle_engine_xf(v) && h->checkAt && FIELD(v, 0x168, float) > 8 && dist2d(p, h->lastP) < 1 && fabsf(p[1] - h->lastP[1]) < 1) {
                 static const float nowhere[3] = { 1e6f, 0, 1e6f };
                 vehicle_xf_locate(v, nowhere);
                 H->log("heli: %s reads %.1f at +0x168 but its transform stood still: searching again", vehicle_name(v), FIELD(v, 0x168, float));
@@ -233,6 +311,29 @@ static int heli_think(int i, Bot *b, void *v, int seat, int team)
     }
     if (vehicle_xf_pick_moving(v, h->lastFwd > 0.5f)) H->log("heli: %s - switched to the transform that moved", vehicle_name(v));
     if (g_heliMode == 1) { heli_probe(i, b, v, t, h); h->lastFwd = b->fwd; return 1; }
+    {   // on the pad: teammates walking up to it - wait for them (up to 15 s); the flight starts fresh after
+        static ULONGLONG boardAt[MAX_BOTS]; static void *boardVeh[MAX_BOTS];
+        if (boardVeh[i] != v) { boardVeh[i] = v; boardAt[i] = t; }
+        if (t - boardAt[i] < 15000) {
+            int coming = 0;
+            const float *hp0 = veh_pos(v);
+            for (int o = 0; o < H->botCount; o++) if (hp0 && o != i && !g_bot[o].inVehicle && g_bot[o].takingAt && t - g_bot[o].takingAt < 5000 && dist2d(g_bot[o].lastPos, hp0) < 12) coming++;
+            if (coming) { h->startAt = t; return 1; }
+        }
+    }
+    {   // A pilot with no control (seated through enterEntry, the helicopter answers nothing): not 3 m up after 20 s of
+        // full collective - it gets out and the helicopter is left for 60 s (Siege 2026-10-30: 3 of 6 sat on their pads)
+        static float y0[MAX_BOTS], yMax[MAX_BOTS], p0[MAX_BOTS][3]; static void *v0[MAX_BOTS];
+        const float *hp = veh_pos(v);
+        if (hp) {
+            if (v0[i] != v || t - h->startAt < 100) { v0[i] = v; y0[i] = hp[1]; yMax[i] = hp[1]; memcpy(p0[i], hp, 12); }
+            if (hp[1] > yMax[i]) yMax[i] = hp[1];
+            if (t - h->startAt > 20000 && yMax[i] - y0[i] < 3 && dist2d(hp, p0[i]) < 5) {   // (10 s, was 20: retried sooner - the tester "4 choppers in the air")   // (not moved at all - one flying level is fine)
+                static unsigned fl; if (fl++ < 20) H->log("heli: %s has no control of the %s (not 3 m up in 20 s) - gets out", (char *)b->player + OFF_PLAYER_NAME, vehicle_name(v));
+                known_veh_skip(v, t + 15000); vehicle_exit(b, t, &g_drv[i], "no control of the helicopter"); return 1;
+            }
+        }
+    }
     heli_fly(i, b, v, team, t, h);
     return 1;
 }

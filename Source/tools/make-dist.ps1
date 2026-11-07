@@ -12,7 +12,7 @@ if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
 New-Item -ItemType Directory -Force $dst, "$dst\out", "$dst\Data", "$dst\Source" | Out-Null
 
 foreach ($f in 'README.txt', 'PATCHNOTES.txt', 'Setup-Thugbot.bat', 'Setup-Thugbot.ps1', 'Thugbot-Paths.ps1', 'Start-Thugbot.bat', 'Start-Thugbot.ps1', 'Thugbot-Control.bat', 'Thugbot-Control.ps1', 'Thugbot-Keys.bat',
-               'Thugbot-Keys.ps1', 'Thugbot-Chat.ps1', 'Open-Thugbot-Map.bat', 'Open-Thugbot-3DMap.bat', 'Install-Thugbot.ps1', 'Uninstall-Thugbot.ps1') {
+               'Thugbot-Keys.ps1', 'Thugbot-Chat.ps1', 'Open-Thugbot-Map.bat', 'Open-Thugbot-3DMap.bat', 'Install-Thugbot.ps1', 'Uninstall-Thugbot.ps1', 'Thugbot-Launcher.bat', 'Thugbot-Launcher.ps1') {
     Copy-Item (Join-Path $root $f) $dst
 }
 Copy-Item "$root\out\xinput9_1_0.dll", "$root\out\ThugbotCore.dll" "$dst\out"
@@ -34,6 +34,8 @@ Combat=1
 Peek=1
 ; Bots get in and drive vehicles (1) or stay on foot and leave vehicles they spawn in (0)
 Vehicles=0
+; With Vehicles=1: bots fly helicopters (1, experimental) or pilots get out (0)
+HeliFly=1
 '@ | Set-Content "$dst\Thugbot.ini" -Encoding ascii
 
 # Learned data: everything learned, and only the current grid / route versions (older ones are rebuilt anyway)
@@ -52,12 +54,14 @@ Remove-Item "$dst\Source\tools\Map3D\cache" -Recurse -Force -ErrorAction Silentl
 New-Item -ItemType Directory -Force "$dst\tools" | Out-Null
 Copy-Item "$root\tools\Map3D" "$dst\tools\Map3D" -Recurse
 Remove-Item "$dst\tools\Map3D\cache" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item "$dst\tools\Map3D\textures" -Recurse -Force -ErrorAction SilentlyContinue   # (the game's own images: never shipped)
+Remove-Item "$dst\Source\tools\Map3D\textures" -Recurse -Force -ErrorAction SilentlyContinue
 Copy-Item "$root\build.bat" "$dst\Source"
 # (PORT-PLAN.md - the work log - stays out: it names this PC's folders and players. Thugbot-Paths.ini too: each PC
 # makes its own with Setup-Thugbot.bat.)
 
 # Source comments quote the tester by name: neutral in the package.
-Get-ChildItem "$dst\Source" -Recurse -File -Include *.c, *.h, *.inc, *.ps1, *.sh, *.py | ForEach-Object {
+Get-ChildItem $dst -Recurse -File -Include *.c, *.h, *.inc, *.ps1, *.sh, *.py, *.js, *.html | ForEach-Object {
     $c = [IO.File]::ReadAllText($_.FullName); $n = $c -replace '\bRob\b', 'the tester' -replace "\bRob's\b", "the tester's"
     if ($n -ne $c) { [IO.File]::WriteAllText($_.FullName, $n) }
 }

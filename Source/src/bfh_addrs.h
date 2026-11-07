@@ -2,6 +2,11 @@
 // (0x140000000 when not relocated); found with Ghidra (re\dump). The counterpart of AltBotMod's ADDR_/OFF_ table.
 #pragma once
 
+// Helicopter port from FloodBots: 1 = pilots fly and fight by default (heli_test build.bat passes it), 0 = pilots get out as before. Ini HeliFly overrides.
+#ifndef THUGBOT_HELI_PORT
+#define THUGBOT_HELI_PORT 0
+#endif
+
 // ---- PseudoPlayerManager (BF\BF\Server\PseudoPlayer\PseudoPlayerManager.cpp) ----
 #define RVA_PPM_UPDATE          0x46ac70  // PseudoPlayerManager::update(this, int, float dt) - every server frame
 #define RVA_PPM_UPDATE_CALL     0x18253b  // the E8 call to it in the server's frame update (rcx = owner+0x98)
@@ -41,6 +46,8 @@
 #define EIA_SWITCH_GADGET1      0xdd475fb1  // EIASwitchToDynamicGadget1
 #define EIA_SWITCH_GADGET2      0xdd475fb2  // EIASwitchToDynamicGadget2
 #define EIA_SWITCH_PRIMARY      0x7b48642f  // EIASwitchToPrimaryWeapon
+#define EIA_SELECT_WEAPON1      0x33ebbc13  // djb2-xor "EIASelectWeapon1" (6 uses in this exe; vehicle weapon 1: not seen live on Hardline)
+#define EIA_SELECT_WEAPON2      0x33ebbc10  // djb2-xor "EIASelectWeapon2" (6 uses in this exe; vehicle weapon 2: not seen live on Hardline)
 #define EIA_SWITCH_STATIC       0xed46260d  // EIASwitchToStaticGadget (the class item: first aid / ammo kits - not yet confirmed live)
 
 // ---- Damage: BFServerSoldierHealthComponent::onDamage(this, DamageResult *ret, DamageInfo *info) (virtual) ----

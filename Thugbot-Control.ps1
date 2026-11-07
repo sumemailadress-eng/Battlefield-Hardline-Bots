@@ -1,4 +1,4 @@
-﻿# Thugbot Control: a small window to run the Hardline bot server. Start / stop it with a number of bots per team, pick a
+# Thugbot Control: a small window to run the Hardline bot server. Start / stop it with a number of bots per team, pick a
 # map and mode and switch to it now, edit the map rotation, restart or end the round, and open the learned map.
 # Talks to the server over RCON (the port and password from !StartServer-Bots.bat). Run Thugbot-Control.bat.
 # Also starts the backend (MySQL, the web server with the server-list API, the Hardline Blaze emulator) and finds the
@@ -220,7 +220,7 @@ function Start-Server {
     $bots = [int]$numBots.Value * 2
     Say "Starting BF-Portable and the server with $bots bots ($($numBots.Value) per team)..."
     $f.Refresh()
-    # (Rob: "make the UI start the MySQL server") - before Blaze, which needs the database
+    # (the tester: "make the UI start the MySQL server") - before Blaze, which needs the database
     if (-not (Start-MySql)) { return }
     Start-Web
     Say "Starting the server with $bots bots ($($numBots.Value) per team)..."

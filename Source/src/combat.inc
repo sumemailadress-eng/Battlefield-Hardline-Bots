@@ -56,6 +56,7 @@ typedef struct Settings {
 static Settings g_set = { 2, 1, 0.3f, 1, 1, 0, 1 };
 static const Profile *P = &kProfiles[2];
 
+static int g_heliMode;   // drive.inc
 static void settings_load(void)
 {
     char path[MAX_PATH], v[64];
@@ -95,6 +96,8 @@ static void settings_load(void)
     g_set.peek = GetPrivateProfileIntA("Thugbot", "Peek", 1, path);
     g_set.vehicles = GetPrivateProfileIntA("Thugbot", "Vehicles", 0, path);
     g_set.supplies = GetPrivateProfileIntA("Thugbot", "Supplies", 1, path);
+    g_heliMode = GetPrivateProfileIntA("Thugbot", "HeliFly", THUGBOT_HELI_PORT, path) ? 2 : 0;   // (helicopter port: 0 pilots get out, else fly; needs Vehicles=1)
+    H->log("settings: heli port %s, heli mode %d", THUGBOT_HELI_PORT ? "built in (test build)" : "off by default", g_heliMode);
     P = &kProfiles[g_set.difficulty];
     H->log("settings: %s - difficulty %s, aggression %d, defend share %.2f, combat %s, peek %s, vehicles %s, supplies %s", path, kProfileNames[g_set.difficulty],
            g_set.aggression, g_set.defendShare, g_set.combat ? "on" : "off (simple)", g_set.peek ? "on" : "off", g_set.vehicles ? "on" : "off", g_set.supplies ? "on" : "off");

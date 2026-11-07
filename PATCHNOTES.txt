@@ -1,6 +1,59 @@
 ThugBot patch notes
 ===================
 
+V0.3 early release (2026-11-07)
+-------------------------------
+Vehicles are still NOT officially supported, and bots still stay on foot by default (Vehicles=0). To try helicopters and
+the new driving, set Vehicles=1 in Thugbot.ini or turn it on in the control window.
+
+Everything below is new and has not been play-tested in a full round yet, so expect rough edges.
+
+Helicopters (experimental)
+- Bots now fly and fight in helicopters. Set HeliFly=0 in Thugbot.ini to make pilots get out instead.
+- Pilots climb straight up and stay level until they are 20 m clear of the ground. They then fly to their flag and climb
+  over buildings and towers in the way. Nose-down is limited to 15 degrees.
+- Attack and scout helicopters go for aircraft up to 500 m away and everything else up to 300 m, and fire in bursts when
+  lined up.
+- Door gunners aim and fire. They aim blind when the gun's direction can't be found.
+- Bots get a helicopter by spawning in it, or by walking up and pressing E (seen less reliably). A pilot still on the
+  ground after 20 s gets out, and that helicopter is left alone for 15 s.
+- Earlier tests showed helicopters lifting off and then nosing into the ground. This release has the fix for that, but
+  it hasn't been flown yet.
+
+Driving (experimental)
+- Vehicle positions now come from the game's own transform for every vehicle.
+- Drivers steer by the direction the vehicle's body is facing, instead of a mix that could jump around.
+- Drivers slow for corners on every route, not only drawn ones.
+- Drivers wait out a map grid rebuild instead of getting out.
+- Saved vehicle routes now ship for Hollywood Heights, Offshore and mp_desert05.
+
+Flags and routes
+- Bots keep the flag they chose for 45 - 60 s instead of voting again every 4 - 6 s, and stay on a flag they are capturing.
+- A route to a flag is walked to its end. It only opens up again if the bot gets stuck or after 2 minutes.
+- Drivers keep their road route to the same flag instead of replacing it every 6 s.
+- A bot with no route joins any learned route towards its target, using a short planned walk to reach it if needed.
+- Only human players on foot can grow the map grid now, and bots keep their routes while it rebuilds.
+
+Getting out at flags
+- When a route gets no closer to a flag under 150 m away, the driver stops. The driver and bot passengers get out and walk.
+- Once the flag is taken, or after 90 s, they walk back and get in again with E if the vehicle is still there.
+- Bots riding with a human driver stay in the vehicle.
+
+Also new
+- Thugbot-Launcher.bat: a launcher for running up to four Hardline servers from one window.
+
+Fixed
+- A jet ski counted as an aircraft.
+- A bot getting back into the same vehicle got straight out again.
+
+Known issues
+- Pitch, roll and yaw directions for helicopters have not been confirmed in flight.
+- Car steering direction has not been confirmed with the new heading. The log prints "steer check" lines to show it.
+- Keeping a flag for longer can bunch bots up.
+- Passengers may not always get out, because the exit key is unreliable for them.
+- On mp_desert05, four flags log "no way up" and bots fail to find some short climbs, so they can have trouble reaching them.
+- Bots don't drive boats. Water exits on Offshore still fail often.
+
 V0.2 early release (2026-11-05)
 -------------------------------
 Vehicles are NOT officially supported yet. Bots stay on foot by default (Vehicles=0). You can still turn vehicles on to

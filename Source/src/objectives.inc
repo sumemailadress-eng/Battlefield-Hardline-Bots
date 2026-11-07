@@ -14,6 +14,8 @@
 // Returns 1 when it set b->target (and b->targetFlag: flag index, or -1).
 
 typedef struct FlagInfo { int ok, owner; float pos[3], radius; int enemies[3], friends[3], attackers[3]; } FlagInfo;
+// In the capture area: within scale x its radius across and on its floor (FloodBots)
+static int in_area(const float *pos, const FlagInfo *fi, float scale) { return dist2d(pos, fi->pos) < fi->radius * scale && fabsf(pos[1] - fi->pos[1]) < 8; }
 static FlagInfo g_fi[MAX_CPS];
 static unsigned g_fiFrame = ~0u;
 static void *g_flagGroundCp[MAX_CPS];
@@ -198,8 +200,19 @@ static int objective_flags(int i, Bot *b, int team, const float *pos)
         if (cur >= 0 && curScore < bestScore + 40) best = cur;   // keep the flag we're going for
         // Decide at most every 4 - 6 s per bot (staggered): deciding every frame on the previous frame's head-count, a
         // whole team of 28 swung from one flag to another and back 30 times a second (each saw the other flag empty).
-        if (cur >= 0 && t < b->attackChooseAt) best = cur;
-        else if (best >= 0) b->attackChooseAt = t + 4000 + (b->seed % 2000);
+        // Committed: the flag it chose stays for 45 - 60 s, until it is ours (then it isn't "cur" any more), the watchdog gives up on
+        // it or no route there exists. It used to re-vote every 4 - 6 s on head-counts that changed as teammates re-voted.
+        { ULONGLONG sp = b->spawnAt; if (sp && t - sp < 1500) b->attackChooseAt = 0; }   // (respawned: chooses from where it is now)
+        if (cur >= 0 && t < b->attackChooseAt && !target_dead(g_fi[cur].pos)) best = cur;
+        else if (best >= 0) b->attackChooseAt = t + 45000 + (b->seed % 15000);
+        // (FloodBots) in its capture area and not ours yet: it stays, whatever another flag scores
+        if (cur >= 0 && in_area(pos, &g_fi[cur], 1.0f) && g_fi[cur].owner != team) best = cur;
+        {   // how often bots really change flag, for the log
+            static unsigned sw, swMade; static ULONGLONG swAt;
+            if (cur >= 0 && best >= 0 && best != cur) sw++, swMade++;
+            if (t - swAt > 60000) { if (swAt) H->log("objective: %u flag change(s) in the last minute (%u bots)", sw, H->botCount); sw = 0; swAt = t; }
+            (void)swMade;
+        }
         if (best >= 0) b->attackFlag = best + 1;
         if (b == g_stTraceBot && g_stTraceFrames > 0) {
             char line[256]; int n = snprintf(line, sizeof line, "steertrace: attack -> flag %d (cur %d, owned %d of %d):", best, cur, owned, total);
@@ -254,7 +267,14 @@ static int objective_target(int i, Bot *b, int team, const float *pos)
     if (combat_target(i, b)) return 1;
     if (ctf_target(i, b, team, pos)) { b->objRoute = 1; return 1; }
     if (rescue_target(i, b, team, pos)) { b->objRoute = 1; return 1; }
-    if (conquest_flags()) { flags_survey(); if (camp_target(i, b, team, pos)) return 1; return objective_flags(i, b, team, pos); }
+    if (conquest_flags()) {
+        flags_survey();
+        // (FloodBots) standing in the area of a flag that isn't ours: that is the one it attacks, no defend / camp job takes it away
+        for (int f = 0; f < g_cpCount; f++)
+            if (g_fi[f].ok && g_fi[f].owner != team && in_area(pos, &g_fi[f], 1.0f)) { b->attackFlag = f + 1; return objective_flags(i, b, team, pos); }
+        if (camp_target(i, b, team, pos)) return 1;
+        return objective_flags(i, b, team, pos);
+    }
     return objective_hunt(i, b, team, pos);
 }
 

@@ -145,9 +145,9 @@ typedef void (*InputDigital_t)(void *state, unsigned hash, char pressed);
 typedef void (*InputAnalog_t)(void *state, unsigned hash, float level);
 static InputCopy_t o_inputCopy;
 static CallHook g_hookCopy;
-enum { BTN_FIRE = 1, BTN_SPRINT = 2, BTN_JUMP = 4, BTN_INTERACT = 8, BTN_MELEE = 16, BTN_RELOAD = 32, BTN_ZOOM = 64, BTN_CROUCH = 128, BTN_EXIT = 256, BTN_LEAN = 512, BTN_CHUTE = 1024, BTN_GL = 2048, BTN_GADGET1 = 4096, BTN_GADGET2 = 8192, BTN_PRIMARY = 16384, BTN_STATIC = 32768, BTN_COUNT = 16 };
-static const unsigned kBtnHash[BTN_COUNT] = { EIA_FIRE, EIA_SPRINT, EIA_JUMP, EIA_INTERACT, EIA_MELEE, EIA_RELOAD, EIA_ZOOM, EIA_CROUCH, EIA_CHANGE_VEHICLE, EIA_VEHICLE_POSE, EIA_PARACHUTE, EIA_SWITCH_GL, EIA_SWITCH_GADGET1, EIA_SWITCH_GADGET2, EIA_SWITCH_PRIMARY, EIA_SWITCH_STATIC };
-static const char *kBtnNames[BTN_COUNT] = { "fire", "sprint", "jump", "interact", "melee", "reload", "zoom", "crouch", "exit", "lean", "chute", "launcher", "gadget1", "gadget2", "primary", "static" };
+enum { BTN_FIRE = 1, BTN_SPRINT = 2, BTN_JUMP = 4, BTN_INTERACT = 8, BTN_MELEE = 16, BTN_RELOAD = 32, BTN_ZOOM = 64, BTN_CROUCH = 128, BTN_EXIT = 256, BTN_LEAN = 512, BTN_CHUTE = 1024, BTN_GL = 2048, BTN_GADGET1 = 4096, BTN_GADGET2 = 8192, BTN_PRIMARY = 16384, BTN_STATIC = 32768, BTN_WEAPON1 = 65536, BTN_WEAPON2 = 131072, BTN_COUNT = 18 };
+static const unsigned kBtnHash[BTN_COUNT] = { EIA_FIRE, EIA_SPRINT, EIA_JUMP, EIA_INTERACT, EIA_MELEE, EIA_RELOAD, EIA_ZOOM, EIA_CROUCH, EIA_CHANGE_VEHICLE, EIA_VEHICLE_POSE, EIA_PARACHUTE, EIA_SWITCH_GL, EIA_SWITCH_GADGET1, EIA_SWITCH_GADGET2, EIA_SWITCH_PRIMARY, EIA_SWITCH_STATIC, EIA_SELECT_WEAPON1, EIA_SELECT_WEAPON2 };
+static const char *kBtnNames[BTN_COUNT] = { "fire", "sprint", "jump", "interact", "melee", "reload", "zoom", "crouch", "exit", "lean", "chute", "launcher", "gadget1", "gadget2", "primary", "static", "weapon1", "weapon2" };
 static unsigned g_testHash;   // "presshash <hex>": that input held (digital) on every bot, for finding keys
 static unsigned g_testButtons;   // "press <name>": held on every bot (toggles), for live tests
 static float g_testPitch;        // "pitch <level>": pitch input on every bot
@@ -159,18 +159,20 @@ static void h_inputCopy(void *dst, void *src)
     if (g_drive != DRIVE_OFF) {
         unsigned btn = g_testButtons;
         float pitch = g_testPitch, roll = 0, yaw = g_testYaw, thr = 0;
+        int heliOwns = 0;   // a flying pilot: pitch, yaw and roll go in every frame, zero too (FloodBots: an untracked axis holds its last level)
         if (g_drive == DRIVE_PLAY) {
             unsigned b = 0; float p = 0, r = 0, y = 0, th = 0;
-            if (brain_buttons((char *)dst - 0x10, &b, &p, &r, &y, &th)) { btn |= b; if (p) pitch = p; roll = r; if (y) yaw = y; thr = th; }
+            int rc = brain_buttons((char *)dst - 0x10, &b, &p, &r, &y, &th);
+            if (rc) { heliOwns = rc == 2; btn |= b; if (p || heliOwns) pitch = p; roll = r; if (y || heliOwns) yaw = y; thr = th; }
         }
         InputTrack_t track = (InputTrack_t)(H->image + RVA_INPUT_TRACK);
         for (int k = 0; k < BTN_COUNT; k++)
             if (btn & (1u << k)) { track(src, kBtnHash[k], 1); ((InputDigital_t)(H->image + RVA_INPUT_SET_DIGITAL))(src, kBtnHash[k], 1); }
         if (g_testHash) { track(src, g_testHash, 1); ((InputDigital_t)(H->image + RVA_INPUT_SET_DIGITAL))(src, g_testHash, 1); }
-        if (pitch) { track(src, EIA_PITCH, 1); ((InputAnalog_t)(H->image + RVA_INPUT_SET_ANALOG))(src, EIA_PITCH, pitch); }
-        if (yaw) { track(src, EIA_YAW, 1); ((InputAnalog_t)(H->image + RVA_INPUT_SET_ANALOG))(src, EIA_YAW, yaw); }
+        if (pitch || heliOwns) { track(src, EIA_PITCH, 1); ((InputAnalog_t)(H->image + RVA_INPUT_SET_ANALOG))(src, EIA_PITCH, pitch); }
+        if (yaw || heliOwns) { track(src, EIA_YAW, 1); ((InputAnalog_t)(H->image + RVA_INPUT_SET_ANALOG))(src, EIA_YAW, yaw); }
         if (thr) { track(src, EIA_THROTTLE, 1); ((InputAnalog_t)(H->image + RVA_INPUT_SET_ANALOG))(src, EIA_THROTTLE, thr); }
-        if (roll) { track(src, EIA_ROLL, 1); ((InputAnalog_t)(H->image + RVA_INPUT_SET_ANALOG))(src, EIA_ROLL, roll); }
+        if (roll || heliOwns) { track(src, EIA_ROLL, 1); ((InputAnalog_t)(H->image + RVA_INPUT_SET_ANALOG))(src, EIA_ROLL, roll); }
     }
     o_inputCopy(dst, src);
 }
@@ -694,9 +696,12 @@ __declspec(dllexport) void thugbot_command(char *line)
     else if (!strncmp(line, "presshash ", 10)) { g_testHash = (unsigned)strtoul(line + 10, NULL, 16); H->log("presshash %#x", g_testHash); }
     else if (!strncmp(line, "learnroutes ", 12)) { g_learnRoutes = atoi(line + 12); H->log("learning mode %s", g_learnRoutes ? "on" : "off"); }
     else if (!strcmp(line, "vaultstat")) vault_stat();
+    else if (!strncmp(line, "strictroutes ", 13)) { g_strictRoutes = atoi(line + 13); H->log("strictroutes %d", g_strictRoutes); }
+    else if (!strncmp(line, "vqueue ", 7)) { g_vehQueue = atoi(line + 7); H->log("vqueue %d", g_vehQueue); }
     else if (!strcmp(line, "vnetsnap")) vnet_snap();
     else if (!strncmp(line, "vaultmove ", 10)) { g_vaultMove = atoi(line + 10); H->log("vaultmove %d", g_vaultMove); }
     else if (!strncmp(line, "vaulttp ", 8)) { g_vaultTeleport = atoi(line + 8); H->log("vault placing %s", g_vaultTeleport ? "on" : "off"); }
+    else if (!strncmp(line, "heliflip ", 9)) { g_heliFlip = atoi(line + 9); H->log("heli: sign correction %s", g_heliFlip ? "on" : "off"); }
     else if (!strncmp(line, "heli ", 5)) { g_heliMode = atoi(line + 5); H->log("heli: mode %d (0 get out, 1 control probe, 2 fly)", g_heliMode); }
     else if (!strncmp(line, "drivetest", 9)) {
         const char *a = line[9] == ' ' ? line + 10 : "";

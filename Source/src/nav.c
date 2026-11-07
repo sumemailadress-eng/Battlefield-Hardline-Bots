@@ -1368,6 +1368,7 @@ int nav_reach(const NavGrid *g, float x, float y, float z, float *nodePos)
     return count;
 }
 
+int g_syncMaxExpanded;   // (brain.inc stopgap: a short lead to a learned route - capped so it never stalls a frame)
 int nav_find_path_sync(const NavGrid *g, NavRayFn ray, float sx, float sy, float sz, float tx, float ty, float tz, float *out, int maxPts)
 {
     if(!g || !out || maxPts<1 || !isfinite(sx) || !isfinite(sz) || !isfinite(tx) || !isfinite(tz) || isinf(sy) || isinf(ty)){
@@ -1418,7 +1419,7 @@ int nav_find_path_sync(const NavGrid *g, NavRayFn ray, float sx, float sy, float
     // vehicles: the full weight too (0.5 kept it exact for the cheap paved roads - and searched half of a big map: a
     // Damavand re-route froze the server 1.5 s); a road-hugging route a little less than perfect plans in a fraction
     float hw = ASTAR_HEURISTIC_WEIGHT * (g_pathMask ? 1.0f : g_roadMask ? 0.6f : 1.0f);
-    int maxExpanded = 60000;   // (an unreachable goal used to search a whole big map - ~100 ms - and bots retried every second)
+    int maxExpanded = g_syncMaxExpanded > 0 ? g_syncMaxExpanded : 60000;   // (an unreachable goal used to search a whole big map - ~100 ms - and bots retried every second)
     gs[start] = 0; from[start] = -1; stamp[start] = curStamp;
     heap_push(heap, &hn, 0, start);
     while (hn > 0) {
