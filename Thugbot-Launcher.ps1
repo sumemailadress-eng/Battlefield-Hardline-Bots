@@ -381,6 +381,7 @@ $xamlText = @'
             <Rectangle Width="26" Height="4" Fill="#FF6A00" Margin="0,0,6,0"/>
             <Rectangle Width="10" Height="4" Fill="#FFFFFF" Margin="0,0,10,0"/>
             <TextBlock x:Name="Sub" Text="HARDLINE // COPS VS CRIMINALS // LAN BOTS" FontFamily="Consolas" FontSize="13" Foreground="#8E857B"/>
+            <Button x:Name="BtnGitHub" Style="{StaticResource Btn}" Content="GITHUB" ToolTip="https://github.com/sumemailadress-eng/Battlefield-Hardline-Bots" Padding="10,0" Margin="12,0,0,0" VerticalAlignment="Center"/>
           </StackPanel>
           <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
             <Button x:Name="TabServers" Style="{StaticResource OBtn}" Content="SERVERS" Width="120" Padding="0,4" Margin="0,0,8,0"/>
@@ -471,6 +472,13 @@ $xamlText = @'
               <Button x:Name="BtnRound" Style="{StaticResource Btn}" Content="RESTART ROUND"/>
               <Button x:Name="BtnNext" Style="{StaticResource Btn}" Content="NEXT MAP"/>
               <Button x:Name="BtnVeh" Style="{StaticResource Btn}" Content="VEHICLES: OFF"/>
+            </UniformGrid>
+
+            <TextBlock Text="BOTS (ALL SERVERS)" Style="{StaticResource H}" Margin="0,8,0,4"/>
+            <UniformGrid Columns="3">
+              <Button x:Name="BtnDiff" Style="{StaticResource Btn}" Content="DIFFICULTY: HARD" ToolTip="Click for the next level: easy, normal, hard, veteran, elite"/>
+              <Button x:Name="BtnAimLearn" Style="{StaticResource Btn}" Content="AIM LEARNING: ON" ToolTip="Bots tune their aim from what they hit, and keep it between rounds"/>
+              <Button x:Name="BtnAimMax" Style="{StaticResource Btn}" Content="LEARN LIMIT: 100%" ToolTip="How far aim learning may go: 0, 25, 50, 75 or 100%. Difficulty limits it as well"/>
             </UniformGrid>
 
             <Button x:Name="BtnJoin" Style="{StaticResource OBtn}" Margin="0,10,0,10" Padding="0,12" FontSize="26" BorderThickness="2,2,2,5">
@@ -597,9 +605,9 @@ try { $win = [Windows.Markup.XamlReader]::Parse($xamlText) } catch { Write-Host 
 function Find-Ctl([string]$name) { $win.FindName($name) }
 $ui = @{}
 foreach ($nm in 'GlowR', 'GlowB', 'LightR', 'LightW', 'LightB', 'TitleBox', 'TitleO', 'TitleB', 'TitleW', 'Slice1', 'Slice2', 'Sub', 'BtnBackStart', 'BtnBackStop', 'DotMysql', 'TxtMysql', 'DotWeb', 'TxtWeb', 'DotRedir', 'TxtRedir', 'DotEmu', 'TxtEmu',
-    'SelTitle', 'SelMap', 'SelImg', 'SelName', 'SelPorts', 'SelStatus', 'BtnBotsDn', 'BtnBotsUp', 'TxtBots', 'BtnBotsOn', 'BtnStart', 'BtnStop', 'BtnRestart', 'BtnRound', 'BtnNext', 'BtnVeh',
+    'SelTitle', 'SelMap', 'SelImg', 'SelName', 'SelPorts', 'SelStatus', 'BtnBotsDn', 'BtnBotsUp', 'TxtBots', 'BtnBotsOn', 'BtnStart', 'BtnStop', 'BtnRestart', 'BtnRound', 'BtnNext', 'BtnVeh', 'BtnDiff', 'BtnAimLearn', 'BtnAimMax',
     'BtnJoin', 'JoinText', 'BtnLearned', 'Btn3D', 'BtnClassic', 'RotCount', 'RotTitle', 'LstRot', 'BtnPlay', 'BtnUp', 'BtnDown', 'BtnRemove', 'LstMaps', 'LstModes',
-    'BtnAdd', 'BtnAllMode', 'BtnFill', 'Log', 'TabServers', 'TabMaps', 'PageServers', 'PageMaps', 'BtnShow3D', 'LstReports', 'BtnMapReload', 'BtnMapBrowser', 'WebHost', 'WebMsg') { $ui[$nm] = Find-Ctl $nm }
+    'BtnGitHub', 'BtnAdd', 'BtnAllMode', 'BtnFill', 'Log', 'TabServers', 'TabMaps', 'PageServers', 'PageMaps', 'BtnShow3D', 'LstReports', 'BtnMapReload', 'BtnMapBrowser', 'WebHost', 'WebMsg') { $ui[$nm] = Find-Ctl $nm }
 foreach ($n in 1..4) { foreach ($p in 'Card', 'CardImg', 'CardState', 'CardName', 'CardMap', 'CardPlayers') { $ui["$p$n"] = Find-Ctl "$p$n" } }
 
 function Brush([string]$hex) { $b = New-Object Windows.Media.SolidColorBrush ([Windows.Media.ColorConverter]::ConvertFromString($hex)); $b.Freeze(); $b }
@@ -976,10 +984,17 @@ function Ini-Set([string]$key, [string]$val) {
     $lines = @(if (Test-Path $iniPath) { Get-Content $iniPath } else { '[Thugbot]' })
     $done = $false
     for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -match "^\s*$key\s*=") { $lines[$i] = "$key=$val"; $done = $true } }
-    if (-not $done) { $lines += '; Bots get in and drive vehicles (1) or stay on foot (0)'; $lines += "$key=$val" }
+    if (-not $done) { if ($key -eq 'Vehicles') { $lines += '; Bots get in and drive vehicles (1) or stay on foot (0)' }; $lines += "$key=$val" }
     Set-Content $iniPath $lines -Encoding ascii
 }
-function Update-Veh { $on = (Ini-Get 'Vehicles' '0') -eq '1'; $ui.BtnVeh.Content = $(if ($on) { 'VEHICLES: ON' } else { 'VEHICLES: OFF' }) }
+function Update-Veh {
+    $on = (Ini-Get 'Vehicles' '0') -eq '1'; $ui.BtnVeh.Content = $(if ($on) { 'VEHICLES: ON' } else { 'VEHICLES: OFF' })
+    $ui.BtnDiff.Content = 'DIFFICULTY: ' + (Ini-Get 'Difficulty' 'hard').ToUpper()
+    $ui.BtnAimLearn.Content = $(if ((Ini-Get 'AimLearn' '1') -ne '0') { 'AIM LEARNING: ON' } else { 'AIM LEARNING: OFF' })
+    $ui.BtnAimMax.Content = 'LEARN LIMIT: ' + [int]([double](Ini-Get 'AimLearnMaxSkill' '1') * 100) + '%'
+}
+# (the ini is read again at once: "ini" in Thugbot_cmd.txt. Applies to running servers, new settings at the next fight.)
+function Ini-Apply { try { Set-Content (Join-Path $server 'Thugbot_cmd.txt') 'ini' -Encoding ascii } catch {} }
 
 # ---------------------------------------------------------------- wire up
 foreach ($c in $mapCodes) { [void]$ui.LstMaps.Items.Add((Map-Item $c (Map-Name $c))) }
@@ -1005,9 +1020,22 @@ $ui.BtnVeh.Add_Click({ Safe {
     try { Set-Content (Join-Path $server 'Thugbot_cmd.txt') "vehicles $v" -Encoding ascii } catch {}
     Update-Veh; Say $(if ($v -eq '1') { 'Bots now use vehicles (all servers).' } else { 'Bots stay on foot (all servers).' })
 } })
+$ui.BtnDiff.Add_Click({ Safe {
+    $lv = 'easy', 'normal', 'hard', 'veteran', 'elite'; $k = [array]::IndexOf($lv, (Ini-Get 'Difficulty' 'hard').ToLower())
+    $v = $lv[($k + 1) % 5]; Ini-Set 'Difficulty' $v; Ini-Apply; Update-Veh; Say "Bot difficulty: $v (all servers, now)."
+} })
+$ui.BtnAimLearn.Add_Click({ Safe {
+    $v = if ((Ini-Get 'AimLearn' '1') -ne '0') { '0' } else { '1' }
+    Ini-Set 'AimLearn' $v; Ini-Apply; Update-Veh; Say $(if ($v -eq '1') { 'Aim learning on (all servers, now).' } else { 'Aim learning off: bots stop changing their aim, what they learned stays in use.' })
+} })
+$ui.BtnAimMax.Add_Click({ Safe {
+    $st = 0, 0.25, 0.5, 0.75, 1; $cur = [double](Ini-Get 'AimLearnMaxSkill' '1'); $next = 0; foreach ($x in $st) { if ($x -gt $cur + 0.01) { $next = $x; break } }
+    Ini-Set 'AimLearnMaxSkill' ([string]::Format([Globalization.CultureInfo]::InvariantCulture, '{0}', $next)); Ini-Apply; Update-Veh; Say "Aim learning limit: $([int]($next * 100))% (all servers, now)."
+} })
 $ui.BtnJoin.Add_Click({ Safe { Join-Bf4 $script:sel } })
 $ui.BtnLearned.Add_Click({ Safe { $p = Join-Path $reportDir 'latest.html'; if (Test-Path $p) { Show-Web (New-Object Uri $p).AbsoluteUri 'the learned map (latest)' } else { Say 'No learned map yet - it appears a minute after a round starts.' } } })
 $ui.Btn3D.Add_Click({ Safe { Show-3D } })
+$ui.BtnGitHub.Add_Click({ Safe { Start-Process 'https://github.com/sumemailadress-eng/Battlefield-Hardline-Bots' } })
 $ui.BtnClassic.Add_Click({ Safe { $p = Join-Path $PSScriptRoot 'Thugbot-Control.bat'; if (Test-Path $p) { Start-Process -FilePath $p -WorkingDirectory $PSScriptRoot } } })
 
 # map list editing (the selected server's MapList.txt)

@@ -127,8 +127,15 @@ static void heli_deepscan(void *v, const float *ground, float agl)
 // Attack helicopter pilots fire the nose guns at an enemy within 150 m, ahead and in line (and turn to one in 80 m).
 #define HELI_CRUISE_UP 35.0f
 static int g_heliFlip = 0;   // "heliflip 1": each axis may correct its sign once. Off: a bad reading flipped yaw 1 s into a flight and it spun in (2026-11-06)
-typedef struct HeliCtl { ULONGLONG gndAt, obsAt, scanAt; int gndHit, obsBlocked; float gndY, obsTop; void *tgt; float rateYaw, yawRate; ULONGLONG rateAt; float sign[3], acc[3], prev[3]; ULONGLONG winAt, lastAt; float lastY, vy, lastX, lastZ, vx, vz; int flips[3]; } HeliCtl;
+// A transport over its flag calls the drop: passengers on the ledges and in the back seats get out and parachute down
+static struct { void *v; ULONGLONG at; int flag; } g_dropCall[8];
+static void heli_drop_call(void *v, ULONGLONG t, int flag) { int k = 0; while (k < 8 && g_dropCall[k].v != v) k++; if (k == 8) { static int nx; k = nx++ % 8; } g_dropCall[k].v = v; g_dropCall[k].at = t; g_dropCall[k].flag = flag; }
+static int heli_drop_flag(void *v, ULONGLONG t) { for (int k = 0; k < 8; k++) if (g_dropCall[k].v == v && t - g_dropCall[k].at < 1500) return g_dropCall[k].flag; return -1; }
+static int gun_seat_side(void *v, int prev);   // gunner_heli.inc
+typedef struct HeliCtl { int orbit, orbitSide; ULONGLONG orbitAt; ULONGLONG breakUntil, gndAt, obsAt, scanAt; int gndHit, obsBlocked; float gndY, obsTop; void *tgt; float rateYaw, yawRate; ULONGLONG rateAt; float sign[3], acc[3], prev[3]; ULONGLONG winAt, lastAt; float lastY, vy, lastX, lastZ, vx, vz; int flips[3]; } HeliCtl;
 static HeliCtl g_hctl[MAX_BOTS];
+static int gun_line_ok(const float *a, const float *q);   // gunner_heli.inc
+static int air_line_ok(const float *a, const float *q);
 static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
 {
     HeliCtl *c = &g_hctl[i];
@@ -153,6 +160,7 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
     float aim[3]; memcpy(aim, b->target, 12);
     // an enemy near: attack helicopters go for it
     const char *category = vehicle_name(v);
+    int airTarget = 0;
     int attack = strstr(category, "ATTACK") || strstr(category, "attack") || strstr(category, "scout") || strstr(category,"SCOUT"), firing = 0;
     float ground = p[1] - 200;
     if (t >= c->gndAt) { c->gndAt = t + 150; c->gndHit = 0; float a[3] = { p[0], p[1] - 2, p[2] }, e[3] = { p[0], p[1] - 300, p[2] }, hh[3]; if (ray_cast(a, e, hh, NULL)) { c->gndHit = 1; c->gndY = hh[1]; } }   // (lag fix 0.3.1: rays a few times a second, not every frame)
@@ -174,10 +182,11 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
             // (the tester 2026-10-29: "helicopters fight each other") an enemy aircraft out to 300 m comes first (scored 200 m
             // nearer), then anything within 150 m
             int air = ev && name_is_air(vehicle_name(ev));
-            float range = air ? 500 : 300, score = d - (air ? 400 : 0);   /* (the tester 2026-10-30: "increase their range" - infantry / ground 300 m, was 150) */
+            float range = air ? 500 : 220, score = d - (air ? 400 : 0);   /* (the tester 2026-10-30: "increase their range" - infantry / ground 300 m, was 150) */
             if (d < 0.5f || d > range || score >= best) continue;
-            float s0[3] = { p[0] + (q[0] - p[0]) / d * 4, p[1] + (q[1] - p[1]) / d * 4, p[2] + (q[2] - p[2]) / d * 4 };
-            if (!clear_line(s0, q)) continue;
+            // (clear_line wants the ray to end within 0.6 m of the target's centre: on a vehicle or helicopter it stops on the hull, so they were never picked. the tester 2026-11-07)
+            float st = fminf(8.0f, d * 0.5f), s0[3] = { p[0] + (q[0] - p[0]) / d * st, p[1] + (q[1] - p[1]) / d * st, p[2] + (q[2] - p[2]) / d * st };
+            if (ev ? !air_line_ok(s0, q) : !clear_line(s0, q)) continue;
             best = score; c->tgt = pl;
         }
         }
@@ -186,12 +195,39 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
             if (there) {
                 void *ev = player_vehicle(c->tgt, NULL); const float *qq = NULL; float dy = 0;
                 if (ev) qq = veh_pos(ev); else { void *s = bot_soldier(c->tgt); if (s) { qq = soldier_pos(s); dy = 1; } }
-                if (qq) { memcpy(aim, qq, 12); aim[1] += dy; firing = 1; }
+                if (qq) {
+                    memcpy(aim, qq, 12); aim[1] += dy; firing = 1;
+                    if (ev) { veh_lead(ev, aim, dist2d(p, aim), 500); airTarget = name_is_air(vehicle_name(ev)); }
+                }
             } else c->tgt = NULL;
         }
-        if (firing) { dist = dist2d(p, aim); want = fmaxf(fminf(want, aim[1] + 25), ground + 15); }
+        if (firing) { dist = dist2d(p, aim); want = airTarget ? fmaxf(aim[1], ground + 15) : fmaxf(fminf(want, aim[1] + 25), ground + 15); }   // (a helicopter: at its height, to get the nose on it)
     }
+    // Attack run (the tester 2026-11-07: "the attack chopper should pitch down and fire at people"): at a target on the ground it flies in 30 m over it, nose
+    // on it, then breaks off and climbs when close or low
+    float agl = c->gndHit ? p[1] - c->gndY : 200;
+    int groundRun = attack && firing && !airTarget;
+    if (groundRun) {
+        if (t >= c->breakUntil && (dist < 45 || agl < 16)) c->breakUntil = t + 3500;
+        want = t < c->breakUntil ? ground + 55 : fmaxf(aim[1] + 30, ground + 28);
+    }
+    // A transport goes low over its flag and calls the drop
+    if (!attack && b->targetFlag >= 0 && dist < 70) want = fmaxf(aim[1] + 25, ground + 25);
+    if (!attack && b->targetFlag >= 0 && b->targetFlag < MAX_CPS && dist < 60 && agl > 12 && g_fi[b->targetFlag].ok && g_fi[b->targetFlag].owner != team) heli_drop_call(v, t, b->targetFlag);
     float yawErr = wrap_pi(atan2f(aim[0] - p[0], aim[2] - p[2]) - yaw);
+    // (the tester 2026-11-07: door guns only reach one side) A transport with gunners aboard circles a flag it doesn't hold, side on, 50 m out: nose along the circle, a little inward when outside
+    // it and outward when inside. Lifting off, the tower check and the height loop are as before.
+    int orbit = 0;
+    if (!attack && b->targetFlag >= 0 && b->targetFlag < MAX_CPS && g_fi[b->targetFlag].ok && g_fi[b->targetFlag].owner != team && t - h->startAt > 8000 && dist < (c->orbit ? 150.0f : 110.0f)) {
+        if (t >= c->orbitAt) { c->orbitAt = t + 1000; c->orbitSide = gun_seat_side(v, c->orbitSide); }
+        if (c->orbitSide) {
+            float off = 1.5708f + fmaxf(-0.7f, fminf(0.5f, (50.0f - dist) * 0.02f));
+            yawErr = wrap_pi(atan2f(aim[0] - p[0], aim[2] - p[2]) - c->orbitSide * off - yaw);
+            orbit = 1;
+            if (!c->orbit) { static unsigned ol; if (ol++ < 60) H->log("heli: %s circles flag %d side on (%+d) with its gunners, %.0f m away", vehicle_name(v), b->targetFlag, c->orbitSide, dist); }
+        }
+    }
+    c->orbit = orbit;
     // Towers, cranes, cliffs (the tester 2026-10-29: "pilots should avoid towers or anything really high"): three rays 80 m
     // ahead along the nose (level, and 8 m / 16 m below it) - something there: climb over it and hold the nose level
     // until clear; the climb aims 15 m over the highest point the rays found.
@@ -218,18 +254,22 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
         if (blockedAhead) { want = fmaxf(want, top + 20); static unsigned tl; if (tl++ < 20) H->log("heli: %s - something tall ahead (top %.0f): climbing to %.0f", vehicle_name(v), top, want); }
     }
     float tiltWant = t - h->startAt < 5000 ? 0 : dist > 80 ? -0.35f : dist > 30 ? -0.35f * (dist - 30) / 50 : 0.05f;
-    if (!firing && t - h->startAt >= 5000) tiltWant = fmaxf(-0.35f, fminf(0.22f, -dist * 0.006f + (c->vx * sinf(yaw) + c->vz * cosf(yaw)) * 0.055f));
+    if (!firing && t - h->startAt >= 5000) tiltWant = fmaxf(-0.5f, fminf(0.22f, -dist * 0.006f + (c->vx * sinf(yaw) + c->vz * cosf(yaw)) * 0.055f));
     if (!firing) tiltWant *= fmaxf(0, 1 - fabsf(yawErr) / 1.5f);   // (AltBotMod: no nose-down while turning hard)
     if (firing) tiltWant = fmaxf(-0.7f, fminf(0.3f, atan2f(aim[1] - p[1], fmaxf(1, dist))));   // nose at it (the full angle: x0.8 aimed short)
+    if (groundRun) { if (t < c->breakUntil) tiltWant = -0.1f; else if (dist > 180) tiltWant = fminf(tiltWant, -0.35f); }   // (breaking off / still far: flying, not hanging there aiming)
+    if (orbit) { float fw = c->vx * sinf(yaw) + c->vz * cosf(yaw); tiltWant = fmaxf(-0.22f, fminf(0.05f, (fw - 12) * 0.03f)); }   // (about 12 m/s round the circle)
     if (fabsf(yawErr) > 1.2f) tiltWant = 0.03f;
     // (the tester 2026-10-29: "helicopters crashed all around - they should go up vertically first") straight up off the pad
     // until 20 m clear of the ground (and near the cruise height) - no nose-down before that
     int climbFirst = 0;
-    if (p[1] < fmaxf(ground + 20, want - 12)) { tiltWant = 0.02f; climbFirst = t - h->startAt < 20000 && !firing; }
+    if (p[1] < fmaxf(ground + 20, groundRun ? -1e9f : want - 12)) { tiltWant = 0.02f; climbFirst = t - h->startAt < 20000 && !firing; }
     if (blockedAhead && want > p[1] + 3) tiltWant = 0.05f;   // (no flying into it while climbing over)   // (facing well away: hover and turn first - a transport flew off the map nose-first, yaw err 3.0, 2026-10-29)
     // Nose down is limited to 15 degrees, and past that it only pulls up (the tester 2026-11-06: "pitch forward enough to crash")
-    tiltWant = fmaxf(-0.26f, tiltWant);
-    if (pitch < -0.26f) tiltWant = 0.05f;
+    // (log 2026-11-07: the flat 15 degree limit held helicopters to 14 m/s all the way across the map) 29 degrees cruising, 40 on an attack run, 15 when low
+    float noseLimit = groundRun && agl >= 18 ? -0.7f : agl >= 25 ? -0.5f : -0.26f;
+    tiltWant = fmaxf(noseLimit, tiltWant);
+    if (pitch < noseLimit - 0.08f) tiltWant = 0.05f;
     int holdLevel = t - h->startAt < 5000 || climbFirst || p[1] < ground + 20;   // off the pad and until 20 m clear of the ground: straight up and level, no turning
     if (holdLevel) tiltWant = fmaxf(tiltWant, 0.02f);
     float rollWant = !holdLevel && fabsf(yawErr) > 0.3f ? (yawErr > 0 ? 0.12f : -0.12f) : 0;
@@ -272,8 +312,10 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
     // slot 2 (rockets) with a select press at the start of each spell
     // (the tester 2026-10-30: "choppers can't hit the broad side of a barn") fire only with the nose within ~5 m of the target
     // sideways (0.3 rad was 60 m off at 200 m) and within 0.1 rad of its elevation
-    float yawTol = fmaxf(0.03f, atanf(5.0f / fmaxf(dist, 1)));
-    if (attack && firing && fabsf(yawErr) < yawTol && fabsf(tiltWant - pitch) < 0.1f) {
+    float yawTol = fmaxf(0.03f, atanf((airTarget ? 8.0f : 5.0f) / fmaxf(dist, 1)));
+    float aimEl = atan2f(aim[1] - p[1], fmaxf(1, dist));   // (the real angle to it: tiltWant is limited, and held level near the ground)
+    if (attack && firing && fabsf(yawErr) < yawTol && fabsf(aimEl - pitch) < fmaxf(0.1f, atanf(6.0f / fmaxf(dist, 1)))) {
+        { static ULONGLONG fa; if (t >= fa) { fa = t + 5000; H->log("heli: %s fires at %s %.0f m away", (char *)b->player + OFF_PLAYER_NAME, airTarget ? "a helicopter" : "a target", dist); } }
         ULONGLONG ph = t % 12000;
         if (ph < 200) b->buttons |= BTN_WEAPON1; else if (ph >= 6000 && ph < 6200) b->buttons |= BTN_WEAPON2;
         else if ((t % 1500) < 1100) b->buttons |= BTN_FIRE;
@@ -284,6 +326,36 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
         H->log("heli: %s %s at %.0f %.0f %.0f (want %.0f up, ground %.0f), to %.0f m, yaw err %.2f, pitch %.2f (want %.2f), roll %.2f, thr %.2f vy %.1f%s",
                (char *)b->player + OFF_PLAYER_NAME, vehicle_name(v), p[0], p[1], p[2], want, ground, dist, yawErr, pitch, tiltWant, roll, b->fwd, c->vy, firing ? ", attacking" : "");
     }
+}
+// A soldier on a helicopter's ledge: the seat keeps the soldier as the controllable, so it comes through here as if on foot, moving at the helicopter's
+// speed (the "seated" check wants it standing still): it walked, and tried to jump off "edges" (log: chute jumps at 80 m up over the map).
+// Here it stays put and shoots with its own weapons; over the flag it gets out and parachutes down (parachute.inc).
+static int heli_ledge(int i, Bot *b, void *soldier, const float *pos, int team, ULONGLONG t)
+{
+    const float *vel = (const float *)((char *)soldier + OFF_SOLDIER_VELOCITY);
+    if (vel[1] < -4) return 0;   // (falling: the parachute's business)
+    int k = -1; float bd = 9;
+    for (int q = 0; q < g_knownVehN; q++) {
+        KnownVeh *kv = &g_knownVeh[q];
+        if (!kv->occupied || !name_is_air(kv->name) || t - kv->seenAt > 3000) continue;
+        const float *hp = veh_pos(kv->v);
+        if (!hp || fabsf(hp[1] - pos[1]) > 6) continue;
+        float d = dist2d(hp, pos);
+        if (d < bd) { bd = d; k = q; }
+    }
+    if (k < 0 || air_below(pos) < 5) return 0;
+    void *hv = g_knownVeh[k].v;
+    b->why = "on a helicopter's ledge"; b->npts = 0;
+    combat_tick(i, b, soldier, team);
+    b->fwd = b->strafe = 0; b->buttons &= ~(BTN_SPRINT | BTN_JUMP); b->action = 0;
+    int df = heli_drop_flag(hv, t);
+    if (df >= 0) {
+        b->attackFlag = df + 1; b->attackChooseAt = t + 45000;
+        if ((t / 300) % 5 == 0) b->buttons |= ((t / 1500) & 1) ? BTN_EXIT : BTN_INTERACT;
+        static ULONGLONG la; if (t >= la) { la = t + 3000; H->log("heli: %s gets off the ledge over flag %d", (char *)b->player + OFF_PLAYER_NAME, df); }
+    }
+    b->progressAt = t; memcpy(b->progressPos, pos, 12);
+    return 1;
 }
 static int gunner_think(int i, Bot *b, void *v, int seat, int team);   // gunner.inc
 static void combat_tick_vehicle(int i, Bot *b, void *v, int team, int seat) { gunner_think(i, b, v, seat, team); }
@@ -296,7 +368,7 @@ static int heli_think(int i, Bot *b, void *v, int seat, int team)
     ULONGLONG t = now_ms();
     Heli *h = &g_heli[i];
     if (h->veh != v) {
-        memset(h, 0, sizeof *h); h->veh = v; h->startAt = t;
+        memset(h, 0, sizeof *h); h->veh = v; h->startAt = t; veh_hp_note(v, 1, 1);   /* (a new vehicle can reuse an old one's address: its health reads again from the next hit) */
         int k = veh_xf_index(v);
         H->log("heli: %s gets in %s seat %d (%s)", (char *)b->player + OFF_PLAYER_NAME, vehicle_name(v), seat, b->takingAt && t - b->takingAt < 8000 ? "walked up, E" : "spawned in");
         {   // the physics part cars keep their matrix in ([+0x208]+0x80): what a helicopter's holds (quaternion + position?)
@@ -310,6 +382,19 @@ static int heli_think(int i, Bot *b, void *v, int seat, int team)
             H->log("heli: %s candidate %d [+%#x]+%#x at %.1f %.1f %.1f heading %.2f", vehicle_name(v), c, g_vehXf[k].cpo[c], g_vehXf[k].coff[c], g_vehXf[k].c0[c][0], g_vehXf[k].c0[c][1], g_vehXf[k].c0[c][2], g_vehXf[k].c0[c][3]);
     }
     b->fwd = b->strafe = b->turn = 0; b->buttons = 0; b->action = 0; b->pitch = 0; b->roll = 0; b->yawIn = 0; b->throttleIn = 0;
+    {   // Nearly wrecked (the tester 2026-11-07): everyone out, high enough for the parachute or on the ground. In between the pilot lets it down and the others hold on.
+        float hpf = veh_hp_frac(v);
+        if (hpf < 0.18f) {
+            const float *hb = veh_pos(v); float ab = hb ? air_below(hb) : 0;
+            if (ab >= 15 || ab < 3) {
+                static ULONGLONG bl; if (t >= bl) { bl = t + 2000; H->log("heli bail: %s health %.0f%%, %.0f m up, %s gets out", vehicle_name(v), hpf * 100, ab, (char *)b->player + OFF_PLAYER_NAME); }
+                vehicle_exit(b, t, &g_drv[i], "the helicopter is nearly wrecked");
+                return 1;
+            }
+            if (seat == 0) { b->fwd = 0.25f; return 1; }
+        }
+    }
+    // (the tester 2026-11-07: seated gunners stay and use the guns. Only bots riding on the ledge jump over the flag: heli_ledge.)
     if (seat != 0) { combat_tick_vehicle(i, b, v, team, seat); return 1; }   // gunner / passenger seats: shoot
     // +0x168 rises with the throttle (rotor speed?) and the helicopter does fly: if the transform in use stands still
     // while it reads 8+, it is the wrong one - every matrix becomes a candidate again and the one that moves wins.
@@ -329,10 +414,10 @@ static int heli_think(int i, Bot *b, void *v, int seat, int team)
     {   // on the pad: teammates walking up to it - wait for them (up to 15 s); the flight starts fresh after
         static ULONGLONG boardAt[MAX_BOTS]; static void *boardVeh[MAX_BOTS];
         if (boardVeh[i] != v) { boardVeh[i] = v; boardAt[i] = t; }
-        if (t - boardAt[i] < 15000) {
+        if (t - boardAt[i] < 20000) {
             int coming = 0;
             const float *hp0 = veh_pos(v);
-            for (int o = 0; o < H->botCount; o++) if (hp0 && o != i && !g_bot[o].inVehicle && g_bot[o].takingAt && t - g_bot[o].takingAt < 5000 && dist2d(g_bot[o].lastPos, hp0) < 12) coming++;
+            for (int o = 0; o < H->botCount; o++) if (hp0 && o != i && !g_bot[o].inVehicle && ((g_bot[o].takingAt && t - g_bot[o].takingAt < 5000 && dist2d(g_bot[o].lastPos, hp0) < 12) || (g_bot[o].boardHeli == v && t - g_bot[o].boardHeliAt < 2000))) coming++;
             if (coming) { h->startAt = t; return 1; }
         }
     }

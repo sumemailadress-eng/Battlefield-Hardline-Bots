@@ -38,6 +38,7 @@ a{color:var(--acc)}
   <div class="row"><label><input type="checkbox" id="sFlags" checked>Flags</label><label><input type="checkbox" id="sSpawns" checked>Spawns</label><label><input type="checkbox" id="sExits" checked><span class="sw" style="background:#22d3ee"></span>Water exits</label><a id="ply" href="#">Export PLY</a></div>
   <div class="row"><label title="Ground with the same material as under the parked vehicles, and where vehicles have been driven. Rough: on most maps it also covers plain ground, so it is not a road map"><input type="checkbox" id="sRoads"><span class="sw" style="background:#f1f3f5"></span>Road material (rough) <span class="sw" style="background:#74c0fc"></span>Driven <span id="roadCount"></span></label></div>
   <div class="row"><label title="Worked out from the scan by shape, so it is a guide: it can miss some and name others wrongly"><input type="checkbox" id="sOver"><span class="sw" style="background:#ff9ff3"></span>Bridges <span class="sw" style="background:#ffa94d"></span>Beams <span class="sw" style="background:#ff4757"></span>Low (under 4.5 m) <span id="overCount"></span></label></div>
+  <div class="row"><label title="Where players may be in this mode, from the game's level files: each team's combat area"><input type="checkbox" id="sPlay" checked><span class="sw" style="background:#ff6b6b"></span>Play area</label> <select id="playMode"></select></div>
   <div class="row"><label title="Where vehicles stand when a round starts (the bots save them while a map runs)"><input type="checkbox" id="sVehs" checked><span class="sw" style="background:#ffd43b"></span>Vehicles <span id="vehCount"></span></label><label title="The model name above each vehicle"><input type="checkbox" id="sVehNames" checked>Names</label></div>
   <details id="vehBox"><summary style="cursor:pointer;color:var(--mut)">Vehicle list (click to fly there)</summary><div id="vehList" style="max-height:200px;overflow-y:auto;font-size:12px"></div></details>
   <div class="row"><label title="Hides the scan far outside the flags, spawns and routes"><input type="checkbox" id="crop" checked>Only the play area</label></div>
@@ -89,7 +90,7 @@ const COLORS = { learn: 0xf08c00, veh: 0x20c997, planned: 0x4dabf7, sel: 0xfffff
 let surf = null, surfMat = null;
 let meta = null, cloud = null, cloudMat = null, index = null, data = null, routes = [], sel = -1, pick = -1, tool = 'sel', drawing = null;
 let dirty = { learn: false, veh: false, planned: false, exits: false }, undo = [], limits = {};
-const groups = { routes: new THREE.Group(), marks: new THREE.Group(), handles: new THREE.Group(), roads: new THREE.Group(), over: new THREE.Group(), vehs: new THREE.Group(), exits: new THREE.Group() }; Object.values(groups).forEach(g => scene.add(g));
+const groups = { routes: new THREE.Group(), marks: new THREE.Group(), handles: new THREE.Group(), roads: new THREE.Group(), over: new THREE.Group(), play: new THREE.Group(), vehs: new THREE.Group(), exits: new THREE.Group() }; Object.values(groups).forEach(g => scene.add(g));
 const lineMats = {};
 const lmat = (color, width) => { const k = color + ':' + width; if (!lineMats[k]) { lineMats[k] = new LineMaterial({ color, linewidth: width, worldUnits: false }); lineMats[k].resolution.set(innerWidth - 300, innerHeight); if (color === COLORS.sel) lineMats[k].depthTest = false; } return lineMats[k]; };
 
@@ -264,7 +265,36 @@ async function buildOver() {
     $('overCount').textContent = '(' + bridges + ' / ' + beams + ')';
 }
 $('sOver').onchange = buildOver;
+let playData = null, playFor = '';
+async function buildPlay() {
+    groups.play.visible = $('sPlay').checked;
+    if (!meta) return;
+    const map = meta.map;
+    if (playFor !== map) {
+        playFor = map; playData = await (await fetch('/api/playarea?map=' + map)).json();
+        if (!meta || meta.map !== map) return;
+        const sel = $('playMode'), names = Object.keys(playData);
+        sel.innerHTML = ''; names.forEach(n => { const o = document.createElement('option'); o.value = o.textContent = n; sel.appendChild(o); });
+        const pick = names.find(n => /conquestlarge|turfwarlarge/.test(n)) || names.find(n => /conquest|turfwar/.test(n)) || names[0];
+        if (pick) sel.value = pick;
+        sel.disabled = !names.length; if (!names.length) { const o = document.createElement('option'); o.textContent = 'none for this map'; sel.appendChild(o); }
+    }
+    groups.play.clear();
+    const groundAt = (x, z) => { const cx = Math.round((x - meta.x0) / meta.cell), cz = Math.round((z - meta.z0) / meta.cell); if (cx < 0 || cz < 0 || cx >= meta.w || cz >= meta.h) return meta.ymin; const c = cz * meta.w + cx; let hi = null; for (let k = index.start[c]; k < index.start[c + 1]; k++) hi = hi === null ? index.hs[k] : Math.max(hi, index.hs[k]); return hi ?? meta.ymin; };
+    const polys =(playData || {})[$('playMode').value] || [], mat = new THREE.LineBasicMaterial({ color: 0xff6b6b, depthTest: false, transparent: true, opacity: 0.9 });
+    polys.forEach(poly => {
+        const P = [];
+        for (let k = 0; k <= poly.length; k++) {
+            const a = poly[k % poly.length], b = poly[(k + 1) % poly.length], len = Math.hypot(b[0] - a[0], b[1] - a[1]), steps = Math.max(1, Math.ceil(len / 20));
+            for (let s = 0; s < (k === poly.length ? 1 : steps); s++) { const x = a[0] + (b[0] - a[0]) * s / steps, z = a[1] + (b[1] - a[1]) * s / steps, y = groundAt(x, z); P.push(x, (y === y && y !== undefined ? y : 0) + 3, -z); }
+        }
+        const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+        const line = new THREE.Line(g, mat); line.renderOrder = 8; groups.play.add(line);
+    });
+}
+$('sPlay').onchange = buildPlay; $('playMode').onchange = buildPlay;
 function buildVehicles() {
+    buildPlay();
     groups.vehs.clear(); if (!data) return;
     const vs = data.vehicles || [];
     vs.forEach(v => {

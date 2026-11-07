@@ -99,11 +99,11 @@ $bInstall.Add_Click({
         & (Join-Path $PSScriptRoot 'Install-Thugbot.ps1') -Server $c.Server | Out-Null
         if ($cbShort.Checked) {
             $sh = New-Object -ComObject WScript.Shell; $desk = [Environment]::GetFolderPath('Desktop')
-            foreach ($s in @(@('Thugbot Control', 'Thugbot-Control.bat'), @('Start Thugbot', 'Start-Thugbot.bat'))) {
+            foreach ($s in @(@('Thugbot Launcher', 'Thugbot-Launcher.bat'))) {
                 $lnk = $sh.CreateShortcut((Join-Path $desk "$($s[0]).lnk")); $lnk.TargetPath = Join-Path $PSScriptRoot $s[1]; $lnk.WorkingDirectory = $PSScriptRoot; $lnk.Save()
             }
         }
-        Say "Installed. Settings saved in Thugbot-Paths.ini. Start with Thugbot Control (or Start-Thugbot.bat)."
+        Say "Installed. Settings saved in Thugbot-Paths.ini. Start with Thugbot-Launcher.bat (a shortcut is on your desktop)."
     } catch { Say "Install failed: $($_.Exception.Message)" }
 })
 

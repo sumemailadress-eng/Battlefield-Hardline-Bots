@@ -145,9 +145,9 @@ typedef void (*InputDigital_t)(void *state, unsigned hash, char pressed);
 typedef void (*InputAnalog_t)(void *state, unsigned hash, float level);
 static InputCopy_t o_inputCopy;
 static CallHook g_hookCopy;
-enum { BTN_FIRE = 1, BTN_SPRINT = 2, BTN_JUMP = 4, BTN_INTERACT = 8, BTN_MELEE = 16, BTN_RELOAD = 32, BTN_ZOOM = 64, BTN_CROUCH = 128, BTN_EXIT = 256, BTN_LEAN = 512, BTN_CHUTE = 1024, BTN_GL = 2048, BTN_GADGET1 = 4096, BTN_GADGET2 = 8192, BTN_PRIMARY = 16384, BTN_STATIC = 32768, BTN_WEAPON1 = 65536, BTN_WEAPON2 = 131072, BTN_COUNT = 18 };
-static const unsigned kBtnHash[BTN_COUNT] = { EIA_FIRE, EIA_SPRINT, EIA_JUMP, EIA_INTERACT, EIA_MELEE, EIA_RELOAD, EIA_ZOOM, EIA_CROUCH, EIA_CHANGE_VEHICLE, EIA_VEHICLE_POSE, EIA_PARACHUTE, EIA_SWITCH_GL, EIA_SWITCH_GADGET1, EIA_SWITCH_GADGET2, EIA_SWITCH_PRIMARY, EIA_SWITCH_STATIC, EIA_SELECT_WEAPON1, EIA_SELECT_WEAPON2 };
-static const char *kBtnNames[BTN_COUNT] = { "fire", "sprint", "jump", "interact", "melee", "reload", "zoom", "crouch", "exit", "lean", "chute", "launcher", "gadget1", "gadget2", "primary", "static", "weapon1", "weapon2" };
+enum { BTN_FIRE = 1, BTN_SPRINT = 2, BTN_JUMP = 4, BTN_INTERACT = 8, BTN_MELEE = 16, BTN_RELOAD = 32, BTN_ZOOM = 64, BTN_CROUCH = 128, BTN_EXIT = 256, BTN_LEAN = 512, BTN_CHUTE = 1024, BTN_GL = 2048, BTN_GADGET1 = 4096, BTN_GADGET2 = 8192, BTN_PRIMARY = 16384, BTN_STATIC = 32768, BTN_WEAPON1 = 65536, BTN_WEAPON2 = 131072, BTN_PICKUP = 262144, BTN_COUNT = 19 };
+static const unsigned kBtnHash[BTN_COUNT] = { EIA_FIRE, EIA_SPRINT, EIA_JUMP, EIA_INTERACT, EIA_MELEE, EIA_RELOAD, EIA_ZOOM, EIA_CROUCH, EIA_CHANGE_VEHICLE, EIA_VEHICLE_POSE, EIA_PARACHUTE, EIA_SWITCH_GL, EIA_SWITCH_GADGET1, EIA_SWITCH_GADGET2, EIA_SWITCH_PRIMARY, EIA_SWITCH_STATIC, EIA_SELECT_WEAPON1, EIA_SELECT_WEAPON2, EIA_PICKUP };
+static const char *kBtnNames[BTN_COUNT] = { "fire", "sprint", "jump", "interact", "melee", "reload", "zoom", "crouch", "exit", "lean", "chute", "launcher", "gadget1", "gadget2", "primary", "static", "weapon1", "weapon2", "pickup" };
 static unsigned g_testHash;   // "presshash <hex>": that input held (digital) on every bot, for finding keys
 static unsigned g_testButtons;   // "press <name>": held on every bot (toggles), for live tests
 static float g_testPitch;        // "pitch <level>": pitch input on every bot
@@ -392,6 +392,8 @@ static void players_refresh(void)
 static volatile LONG g_ctfScanDo;   // "ctfscan" (run on the game thread in brain_tick)
 #include "brain.inc"
 #include "vault_hook.inc"
+#include "aimprobe.inc"
+#include "spawnseat.inc"
 
 // "players": every pseudo-player's ServerPlayer (0x2000 bytes each) to Thugbot_players.bin, to find fields such as
 // the team by comparing against RCON's listPlayers.
@@ -575,7 +577,8 @@ static void h_ppmUpdate(void *mgr, int a2, float dt)
             lastA = a.QuadPart;
             ema = ema * 0.98 + ms * 0.02;
             int was = g_shed;
-            if (!g_shedOn) g_shed = 0; else if (ema > 10) g_shed = 1; else if (ema < 3) g_shed = 0;
+            static void *emaWorld; static ULONGLONG emaFrom; if (world != emaWorld) { emaWorld = world; emaFrom = GetTickCount64() + 60000; ema = 0; }   // (a level load's own work isn't overload)
+            if (!g_shedOn || GetTickCount64() < emaFrom) g_shed = 0; else if (ema > 12) g_shed = 1; else if (ema < 7) g_shed = 0;
             if (g_shed != was) { static unsigned sl; if (sl++ < 40) H->log("perfmin: bot code %.1f ms a frame - %s", ema, g_shed ? "overloaded, bots think every other frame" : "back to every frame"); }
             minSum += ms; if (ms > minMax) minMax = ms; if (gap > gapMax) gapMax = gap; minFrames++; minRays += g_raysTotal - rays0; minShed += g_shed != 0;
             ULONGLONG nowT = GetTickCount64();
@@ -589,6 +592,7 @@ static void h_ppmUpdate(void *mgr, int a2, float dt)
     }
     yaw_test_tick();
     if (world) vault_tick();
+    if (world && g_drive == DRIVE_PLAY) { aimprobe_tick(); spawnseat_tick(); }
 }
 
 // ---- bot bullets count: mark hits from a bot's gun as client-confirmed (see RVA_SOLDIER_ON_DAMAGE) ----
@@ -622,6 +626,37 @@ static void *h_onDamage(void *self, void *ret, void *info)
     } else g_dmgOther++;
     return o_onDamage(self, ret, info);
 }
+
+// Measuring only: what bots' shots do to vehicles. "dmg:" lines: damage, and both health readings before -> after (a few a minute), and a total each minute.
+typedef float (*VehHealth_t)(void *);
+static OnDamage_t o_vehDmgH, o_vehDmgB;
+static uintptr_t *g_vehDmgSlotH, *g_vehDmgSlotB;
+static void *veh_damage(OnDamage_t orig, void *self, void *ret, void *info)
+{
+    void *giver = damage_giver_player(info);
+    int bot = 0;
+    for (int i = 0; giver && i < H->botCount; i++) if (H->bots[i] == giver) { bot = 1; break; }
+    VehHealth_t ha = (VehHealth_t)(H->image + RVA_VEH_HEALTH_A), hb = (VehHealth_t)(H->image + RVA_VEH_HEALTH_B);
+    float a0 = ha(self), b0 = hb(self), amount = !IsBadReadPtr((char *)info + OFF_DMG_AMOUNT, 4) ? *(float *)((char *)info + OFF_DMG_AMOUNT) : 0;
+    void *r = orig(self, ret, info);
+    float a1 = ha(self), b1 = hb(self);
+    static unsigned hitsBot, hitsOther; static float sumBot; static ULONGLONG lineAt, minAt;
+    ULONGLONG t = GetTickCount64();
+    if (bot) { hitsBot++; sumBot += amount; for (int i = 0; i < H->botCount; i++) if (H->bots[i] == giver) g_vehHitsBy[i]++; } else hitsOther++;
+    { void **own0 = !IsBadReadPtr((char *)self + 8, 8) ? FIELD(self, 8, void **) : NULL; void *v0 = own0 && !IsBadReadPtr(own0, 8) ? *own0 : NULL; if (v0) veh_hp_note(v0, a1, b1); }
+    if (t >= lineAt) {
+        lineAt = t + 2000;
+        void **own = !IsBadReadPtr((char *)self + 8, 8) ? FIELD(self, 8, void **) : NULL;
+        void *veh = own && !IsBadReadPtr(own, 8) ? *own : NULL;
+        H->log("dmg: %s hit by %s: damage %.1f, health %.1f -> %.1f (other reading %.1f -> %.1f)", veh && !IsBadReadPtr(veh, 0x40) ? vehicle_name(veh) : "vehicle",
+               bot ? (char *)giver + OFF_PLAYER_NAME : giver ? "a player" : "something else", amount, a0, a1, b0, b1);
+    }
+    if (!minAt) minAt = t;
+    if (t - minAt >= 60000) { H->log("dmg: last minute: %u vehicle hits by bots (%.0f damage), %u by others", hitsBot, sumBot, hitsOther); hitsBot = hitsOther = 0; sumBot = 0; minAt = t; }
+    return r;
+}
+static void *h_vehDmgH(void *self, void *ret, void *info) { return veh_damage(o_vehDmgH, self, ret, info); }
+static void *h_vehDmgB(void *self, void *ret, void *info) { return veh_damage(o_vehDmgB, self, ret, info); }
 
 static void damage_dump(void)
 {
@@ -667,8 +702,15 @@ __declspec(dllexport) int thugbot_init(ThugbotHost *host)
     o_cpUpdate = (CpUpdate_t)hook_call(&g_hookCp, RVA_CP_UPDATE_CALL, RVA_CP_UPDATE, (void *)h_cpUpdate, 2);
     o_seqLevelLoaded = (SeqLevelLoaded_t)hook_call(&g_hookSeq, RVA_SEQ_LEVEL_LOADED_CALL, RVA_SEQ_LEVEL_LOADED, (void *)h_seqLevelLoaded, 3);
     o_inputCopy = (InputCopy_t)hook_call(&g_hookCopy, RVA_PP_INPUT_COPY_CALL, RVA_INPUT_COPY, (void *)h_inputCopy, 4);
+    o_spawnGo = (SpawnGo_t)hook_call(&g_hookSpawn, RVA_SPAWN_GO_CALL, RVA_SPAWN_GO, (void *)h_spawnGo, 5);
+    H->log("spawn: seat hook %s, %d%% of spawns aimed at a teammate's vehicle when one has room", o_spawnGo ? "in" : "NOT in: the game's choice only", g_spawnSeatPct);
     H->log("vault hook none, carry %s (velocity from soldier+0x70)", g_vaultMove ? "on" : "off");
     int dmgHook = hook_vtable_slot(&g_onDamageSlot, RVA_SOLDIER_ON_DAMAGE_VT, RVA_SOLDIER_ON_DAMAGE, (void *)h_onDamage, (void **)&o_onDamage);
+    {
+        int h1 = hook_vtable_slot(&g_vehDmgSlotH, RVA_VEH_ON_DAMAGE_H_VT, RVA_VEH_ON_DAMAGE_H, (void *)h_vehDmgH, (void **)&o_vehDmgH);
+        int h2 = hook_vtable_slot(&g_vehDmgSlotB, RVA_VEH_ON_DAMAGE_B_VT, RVA_VEH_ON_DAMAGE_B, (void *)h_vehDmgB, (void **)&o_vehDmgB);
+        H->log("dmg: vehicle damage measuring %s", h1 && h2 ? "on" : "only partly on");
+    }
     int ctfHook = hook_vtable_slot(&g_ctfSlot, CTF_MSG_VT_SLOT, CTF_MSG_FN, (void *)h_ctfOnMsg, (void **)&o_ctfOnMsg);
     if (H->levelKey[0]) strcpy(g_levelKey, H->levelKey);
     nav_set_hit_classifier(nav_hit_class);
@@ -694,6 +736,9 @@ __declspec(dllexport) void thugbot_command(char *line)
     else if (!strcmp(line, "bots")) InterlockedExchange(&g_botsDump, 1);
     else if (!strcmp(line, "combat")) InterlockedExchange(&g_combatDump, 1);
     else if (!strcmp(line, "doors")) InterlockedExchange(&g_doorsDump, 1);
+    else if (!strcmp(line, "aimprobe")) InterlockedExchange(&g_apReset, 1);
+    else if (!strcmp(line, "aimprobe off")) { InterlockedExchange(&g_apOff, 1); H->log("aimprobe: off"); }
+    else if (!strcmp(line, "aimprobe on")) { InterlockedExchange(&g_apOff, 0); H->log("aimprobe: on"); }
     else if (!strncmp(line, "trace ", 6)) { g_traceBot = atoi(line + 6); g_traceFrames = 200; }
     else if (!strncmp(line, "backward ", 9)) { g_noBackward = strcmp(line + 9, "on") != 0; H->log("backward movement %s", g_noBackward ? "off" : "on"); }
     else if (!strncmp(line, "peek ", 5)) { char *sp = strchr(line + 5, ' '); if (sp) { snprintf(g_peekPath, sizeof g_peekPath, "%s", sp + 1); InterlockedExchange(&g_peekBot, atoi(line + 5)); } }
@@ -781,7 +826,8 @@ __declspec(dllexport) void thugbot_shutdown(void)
     unhook_call(&g_hookCp);
     unhook_call(&g_hookSeq);
     unhook_call(&g_hookCopy);
-    unhook_vtable_slot(&g_onDamageSlot, (void *)o_onDamage);
+    unhook_call(&g_hookSpawn);
+    unhook_vtable_slot(&g_onDamageSlot, (void *)o_onDamage); if (g_vehDmgSlotH) unhook_vtable_slot(&g_vehDmgSlotH, (void *)o_vehDmgH); if (g_vehDmgSlotB) unhook_vtable_slot(&g_vehDmgSlotB, (void *)o_vehDmgB);
     if (g_ctfSlot) unhook_vtable_slot(&g_ctfSlot, (void *)o_ctfOnMsg);
     for (int k = 0; k < 200 && g_vehScanBusy; k++) Sleep(50);   // the vehicle memory scan thread runs our code: let it finish
     Sleep(100);

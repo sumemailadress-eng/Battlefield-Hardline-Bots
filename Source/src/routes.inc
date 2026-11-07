@@ -98,6 +98,15 @@ static void routes_load(void)
         }
     }
     fclose(f);
+    {   // routes that leave the play area
+        int drop = 0;
+        for (int k = 0; k < g_routeN; k++) if (!playarea_route_ok((const float (*)[3])g_routes[k].pts, g_routes[k].n)) drop++;
+        if (playarea_may_drop(drop, g_routeN, "saved route(s)", path)) {
+            int w = 0;
+            for (int k = 0; k < g_routeN; k++) if (playarea_route_ok((const float (*)[3])g_routes[k].pts, g_routes[k].n)) { if (w != k) g_routes[w] = g_routes[k]; w++; }
+            g_routeN = w; g_routesDirty = 1;
+        }
+    }
     H->log("routes: %s - %d spawn spot(s), %d saved route(s)", path, g_spawnN, g_routeN);
     for (int k = 0; k < g_breachN; k++) if (g_breach[k].kind == 'n') routes_cut_near(g_breach[k].p);   // (saved before those walls were written off)
 }

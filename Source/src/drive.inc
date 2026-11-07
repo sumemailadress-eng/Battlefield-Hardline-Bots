@@ -10,7 +10,7 @@
 //   35 m from the flag (or with no road there, or stuck three times) it stops and everyone gets out.
 //   Passengers: ride along and get out when the car has stopped for 3 s; the driver's arrival makes them get out too.
 
-#define VEH_ARRIVE_M 35.0f
+#define VEH_ARRIVE_M 20.0f   /* (35: every drive ended a walk short of the flag. the tester 2026-11-07: "go as close as possible") */
 static int g_heliMode = THUGBOT_HELI_PORT ? 2 : 0;   // heli.inc: 0 pilots get out, 1 control probe, 2 fly (ini HeliFly, command "heli N")
 static int name_is_air(const char *nm);
 static int heli_think(int i, Bot *b, void *v, int seat, int team);
@@ -21,7 +21,7 @@ static const NavGrid *g_driveMaskGrid;
 static unsigned g_driveMaskSerial;
 static unsigned g_drives, g_driveArrivals, g_driveGiveUps;
 
-typedef struct Drive { ULONGLONG noMaskSince, navWaitAt; int checkedFront, yield; ULONGLONG startAt, lookAt, edgeAt; float freeC, freeL, freeR; void *veh; ULONGLONG progressAt, reverseUntil, stoppedSince, exitFrom, noRouteSince, traceAt; float progressPos[3], reverseTurn, roadGoal[3], planGoal[3]; int stuck; ULONGLONG turnAroundAt; float stuckYaw; int xfRejected;
+typedef struct Drive { int finalRun; ULONGLONG finalAt, finalChkAt; float finalPos[3]; ULONGLONG noMaskSince, navWaitAt; int checkedFront, yield; ULONGLONG startAt, lookAt, edgeAt; float freeC, freeL, freeR; void *veh; ULONGLONG progressAt, reverseUntil, stoppedSince, exitFrom, noRouteSince, traceAt; float progressPos[3], reverseTurn, roadGoal[3], planGoal[3]; int stuck; ULONGLONG turnAroundAt; float stuckYaw; int xfRejected;
                        float motionYawPos[3], stYaw, stTurn; int lastSign, xfKey, stN; ULONGLONG signAt, stAt; float lastFwd, motionPos[3], motionYaw, matrixOff, avoidTurn; ULONGLONG yieldSince; ULONGLONG motionPosAt, motionAt; int motionN; int onNet, onLine, queueing, turningAround; float netGoal[3], cross, queueGap, footAhead, speed, speedPos[3], prevErr; ULONGLONG speedAt, queueAt, queueSince, blockStillSince, passUntil, laneUntil; } Drive;
 static Drive g_drv[MAX_BOTS];
 // (On foot: the next time it sits in any vehicle is a new drive. Getting back into the same car kept exitFrom set: it got straight out again.)
@@ -188,6 +188,31 @@ static void vehicle_xf_reject(void *v)
     }
 }
 static const float *veh_pos(void *v) { const float *m = vehicle_xf(v); return m ? m + 12 : NULL; }
+// A vehicle's health as last seen by the damage hook (core.c): 1 until it has been hit
+static struct { void *v; float frac; } g_vehHp[32]; static int g_vehHpNext;
+static void veh_hp_note(void *v, float hp, float max)
+{
+    int k = 0; while (k < 32 && g_vehHp[k].v != v) k++;
+    if (k == 32) k = g_vehHpNext++ % 32;
+    g_vehHp[k].v = v; g_vehHp[k].frac = max > 1 ? hp / max : 1;
+}
+static float veh_hp_frac(void *v) { for (int k = 0; k < 32; k++) if (g_vehHp[k].v == v) return g_vehHp[k].frac; return 1; }
+// Where to aim at a moving vehicle: q moved along its velocity by the shot's flight time (1.5 s at most)
+static void veh_lead(void *v, float *q, float dist, float shotSpeed)
+{
+    static struct { void *v; ULONGLONG at; float p[3], vel[3]; } C[16]; static int next;
+    const float *pp = veh_pos(v); if (!pp) return;
+    ULONGLONG t = now_ms(); int k = 0;
+    while (k < 16 && C[k].v != v) k++;
+    if (k == 16) { k = next++ % 16; memset(&C[k], 0, sizeof C[k]); C[k].v = v; C[k].at = t; memcpy(C[k].p, pp, 12); return; }
+    float dt = (t - C[k].at) / 1000.0f;
+    if (dt >= 0.15f) {
+        for (int a = 0; a < 3; a++) { float nv = (pp[a] - C[k].p[a]) / dt; C[k].vel[a] = dt < 1.0f ? C[k].vel[a] * 0.5f + nv * 0.5f : 0; C[k].p[a] = pp[a]; }
+        C[k].at = t;
+    }
+    float tf = fminf(dist / shotSpeed, 1.5f);
+    for (int a = 0; a < 3; a++) q[a] += C[k].vel[a] * tf;
+}
 // A second after the driver got in (throttle on): of the candidate matrices near it, the one that moved or turned most
 // (and stayed plausible) is the car's - the others are frozen copies (spawn point, wreck, other parts). Several copies
 // move with the car (body, chassis): any of them will do. None moved: the car really is standing still.
@@ -591,6 +616,15 @@ static void vnet_load(void)
         if (q == v->n) g_vnetN++;
     }
     fclose(f);
+    {   // routes that leave the play area
+        int drop = 0;
+        for (int k = 0; k < g_vnetN; k++) if (!playarea_route_ok((const float (*)[3])g_vnet[k].pts, g_vnet[k].n)) drop++;
+        if (playarea_may_drop(drop, g_vnetN, "vehicle route(s)", path)) {
+            int w = 0;
+            for (int k = 0; k < g_vnetN; k++) if (playarea_route_ok((const float (*)[3])g_vnet[k].pts, g_vnet[k].n)) { if (w != k) memcpy(&g_vnet[w], &g_vnet[k], sizeof g_vnet[0]); w++; }
+            g_vnetN = w;
+        }
+    }
     H->log("vnet: %d vehicle route(s) loaded for %s", g_vnetN, g_levelKey);
 }
 #define VG_MAX 6000
@@ -762,6 +796,7 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
     if (d->veh != v) {
         if (b->crewVeh == v) { static unsigned rl; if (rl++ < 80) H->log("drive: %s reboard done - back in the %s seat %d", (char *)b->player + OFF_PLAYER_NAME, vehicle_name(v), seat); }
         b->crewVeh = NULL; b->npts = 0; b->wp = 0; b->planAt = 0; b->takingAt = 0;   // (its walking route is no use in a car)
+        if (!name_is_air(vehicle_name(v))) veh_hp_note(v, 1, 1);
         memset(d, 0, sizeof *d); d->veh = v; d->progressAt = t; d->startAt = t; if (seat == 0) g_drives++;
         void *rs = FIELD(b->player, 0x1648, void *);   // the soldier stays where it got in: the car is there
         const float *sp = rs && !IsBadReadPtr(rs, 0x400) ? soldier_pos(rs) : NULL;
@@ -777,6 +812,7 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
     if (!g_set.vehicles) { vehicle_exit(b, t, d, "bots' vehicle use is off"); return 1; }   // (Vehicles=0 in Thugbot.ini / the UI toggle: spawned in one - get out)
     const float *vp = veh_pos(v);
     if (!vp && !(name_is_air(vehicle_name(v)) && g_heliMode && t - d->startAt < 8000)) { vehicle_exit(b, t, d, "no car position"); return 1; }   // (a pilot gets 8 s: FloodBots "stop abandoning helicopters")
+    if (v == g_apHoldV && t < g_apHoldUntil && g_apHoldKick) { b->noVeh = v; b->noVehUntil = g_apHoldUntil; vehicle_exit(b, t, d, "a person is testing its gun"); return 1; }
     { const char *nm = vehicle_name(v); if (name_is_air(nm)) { if (heli_think(i, b, v, seat, team)) return 1; vehicle_exit(b, t, d, "it's an aircraft - bots don't fly yet"); return 1; }
       if (strstr(nm, "BOAT") || strstr(nm, "CAT_") || strstr(nm, "JETSKI") || strstr(nm, "Boat")) { vehicle_exit(b, t, d, "it's a boat - bots don't sail yet"); return 1; }
       if (!strncmp(nm, "MSP", 3) && seat == 0) { static unsigned msp; if (!d->exitFrom && msp++ < 5) H->log("drive: %s - a mobile spawn truck, not driven (it stayed put with any input)", nm); vehicle_exit(b, t, d, "spawn truck"); return 1; } }
@@ -797,13 +833,51 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
         if (gunner_think(i, b, v, seat, team)) b->buttons |= BTN_LEAN;   // a gun seat (boat turret ...): aim and fire
         if (t - d->progressAt > 3000) { if (moved < 1.0f) { if (!d->stoppedSince) d->stoppedSince = t; } else d->stoppedSince = 0; memcpy(d->progressPos, vp, 12); d->progressAt = t; }
         for (int o = 0; o < H->botCount; o++) if (g_drv[o].veh == v && (g_drv[o].queueing || (g_drv[o].navWaitAt && t - g_drv[o].navWaitAt < 500))) { d->stoppedSince = 0; break; }   // (the driver waiting its turn, or for the road map: stay in)
-        if ((d->stoppedSince && t - d->stoppedSince > 3000) || toTarget < VEH_ARRIVE_M * 0.7f) vehicle_exit(b, t, d, "the car stopped");
+        {   // Stopped: out after 3 s if nobody is driving, after 15 s if someone is (a driver reversing, turning or waiting for riders isn't the end of the trip).
+            // Otherwise a passenger rides until its driver stops for the flag (the crew call above).
+            int driven = 0;
+            if (d->stoppedSince) for (int j = 0; j < g_playerCount && !driven; j++) { int s2 = -1; if (player_vehicle(g_players[j], &s2) == v && s2 == 0) driven = 1; }
+            if (veh_hp_frac(v) < 0.15f && !name_is_air(vehicle_name(v))) vehicle_exit(b, t, d, "the vehicle is nearly wrecked");
+            if (d->stoppedSince && !driven && t - d->stoppedSince > 3000) vehicle_exit(b, t, d, "the car stopped");   // (while someone drives it stays, however long: the tester 2026-11-07)
+        }
         return 1;
     }
     if (d->exitFrom) { vehicle_exit(b, t, d, "leaving"); return 1; }
-    if (toTarget < VEH_ARRIVE_M || (d->roadGoal[0] != 0 && dist2d(vp, d->roadGoal) < 8)) { g_driveArrivals++; const char *why0 = toTarget < VEH_ARRIVE_M ? "near the flag" : "end of the road";
+    if (toTarget < VEH_ARRIVE_M || (!d->finalRun && toTarget >= 150 && d->roadGoal[0] != 0 && dist2d(vp, d->roadGoal) < 8)) { g_driveArrivals++; const char *why0 = toTarget < VEH_ARRIVE_M ? "near the flag" : "end of the road";
         if (b->targetFlag >= 0) { g_crewCall[i].v = v; g_crewCall[i].at = t; g_crewCall[i].flag = b->targetFlag; crew_dismount(b, t, d, v, vp, b->targetFlag, toTarget, why0); } else vehicle_exit(b, t, d, why0);
         return 1; }
+    // Riders on their way (at the start of a drive): wait for them, up to 10 s
+    if (t - d->startAt < 10000) {
+        int coming = 0;
+        for (int o = 0; o < H->botCount; o++) if (o != i && !g_bot[o].inVehicle && g_bot[o].boardHeli == v && t - g_bot[o].boardHeliAt < 2000) coming++;
+        if (coming) { d->progressAt = t; memcpy(d->progressPos, vp, 12); return 1; }
+    }
+    if (!d->finalRun && b->targetFlag >= 0 && toTarget < 150 && d->roadGoal[0] != 0 && dist2d(vp, d->roadGoal) < 8) { d->finalRun = 1; d->finalAt = t; d->finalChkAt = 0; }
+    // The last stretch: the road or route gets no closer, the flag is under 150 m. Straight at it over open ground, not fast, until a wall, a drop or no headway
+    // (then this is as close as it goes: everyone out), or 25 s
+    if (d->finalRun) {
+        const char *stop = NULL;
+        float err = wrap_pi(atan2f(b->target[0] - vp[0], b->target[2] - vp[2]) - drive_yaw(d, v, t)), yw = drive_yaw(d, v, t);
+        if (t - d->finalAt > 25000) stop = "as close as it got in time";
+        if (!d->finalChkAt || t >= d->finalChkAt) {
+            if (d->finalChkAt && dist2d(vp, d->finalPos) < 2) stop = "no headway";
+            d->finalChkAt = t + 4000; memcpy(d->finalPos, vp, 12);
+        }
+        float nose = veh_nose(vehicle_name(v));
+        float o[3] = { vp[0] + sinf(yw) * nose, vp[1] + 0.8f, vp[2] + cosf(yw) * nose }, e[3] = { o[0] + sinf(yw) * 8, o[1], o[2] + cosf(yw) * 8 }, h[3], hn[3];
+        if (ray_cast(o, e, h, hn) && hn[1] < 0.8f && dist2d(o, h) < 4 && fabsf(err) < 0.6f) stop = "something solid ahead";
+        float a[3] = { vp[0] + sinf(yw) * 7, vp[1] + 6.9f, vp[2] + cosf(yw) * 7 }, g0[3] = { a[0], vp[1] - 4.2f, a[2] };
+        if (!ray_cast(a, g0, h, NULL)) stop = "the ground drops away";
+        if (stop) {
+            g_driveArrivals++; g_crewCall[i].v = v; g_crewCall[i].at = t; g_crewCall[i].flag = b->targetFlag;
+            crew_dismount(b, t, d, v, vp, b->targetFlag, toTarget, stop);
+            return 1;
+        }
+        b->turn = fmaxf(-1, fminf(1, -err * 1.5f));
+        b->fwd = d->speed > (fabsf(err) > 0.6f ? 5.0f : 10.0f) ? 0 : 1;
+        static ULONGLONG fl; if (t >= fl) { fl = t + 5000; H->log("drive: %s drives straight for its flag, %.0f m to go", (char *)b->player + OFF_PLAYER_NAME, toTarget); }
+        return 1;
+    }
 
     // route on the road map
     const unsigned char *mask = drive_mask();
@@ -857,14 +931,14 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
         else if (!deferred) { b->npts = 0; b->planAt = t; if (!d->noRouteSince) d->noRouteSince = t; }
     }
     if (!b->npts && d->noRouteSince && t - d->noRouteSince > 3000) {
-        if (b->targetFlag >= 0 && toTarget < 150) { g_crewCall[i].v = v; g_crewCall[i].at = t; g_crewCall[i].flag = b->targetFlag; crew_dismount(b, t, d, v, vp, b->targetFlag, toTarget, "no road further"); return 1; }
+        if (b->targetFlag >= 0 && toTarget < 150) { d->finalRun = 1; d->finalAt = t; d->finalChkAt = 0; return 1; }
         g_driveGiveUps++; vehicle_exit(b, t, d, "no road to the flag"); return 1;
     }
     // The flag a bit off the route: nothing left of the route gets nearer to it than here - this is as close as it goes
     if (b->targetFlag >= 0 && toTarget < 150 && b->npts && b->wp < b->npts) {
         float rest = 1e9f;
         for (int q = b->wp; q < b->npts; q++) { float dd = dist2d(&b->path[q * 3], b->target); if (dd < rest) rest = dd; }
-        if (toTarget <= rest + 5.0f) { g_crewCall[i].v = v; g_crewCall[i].at = t; g_crewCall[i].flag = b->targetFlag; crew_dismount(b, t, d, v, vp, b->targetFlag, toTarget, "closest point of the route"); return 1; }
+        if (toTarget <= rest + 5.0f) { d->finalRun = 1; d->finalAt = t; d->finalChkAt = 0; return 1; }   // (nothing left of the route gets nearer)
     }
     int strictNet = g_strictRoutes && d->onNet;
     if (strictNet && b->npts && b->wp < b->npts) {   // where the car is along the route (40 m at most: a loop in it is not skipped), and a point already beside or behind it is passed
@@ -885,11 +959,12 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
         float px = a0[0] + sx * u - vp[0], pz = a0[2] + sz * u - vp[2]; d->cross = sqrtf(px * px + pz * pz);
     }
     if (d->cross < 10) d->onLine = 1;
-    if (strictNet && d->onLine && d->cross > 40) { static unsigned cl; if (cl++ < 20) H->log("drive: %s is %.0f m off its route - picks one again", (char *)b->player + OFF_PLAYER_NAME, d->cross); b->npts = 0; b->planAt = t; d->onNet = 0; d->onLine = 0; return 1; }
+    if (strictNet && d->onLine && d->cross > 20) { static unsigned cl; if (cl++ < 20) H->log("drive: %s is %.0f m off its route - picks one again", (char *)b->player + OFF_PLAYER_NAME, d->cross); b->npts = 0; b->planAt = t; d->onNet = 0; d->onLine = 0; return 1; }
     const float *aim = b->npts && b->wp < b->npts ? &b->path[b->wp * 3] : b->target;
     float pursuit[3];
     if (strictNet && b->npts && b->wp < b->npts) {   // aim close ahead on the route, stopping short of a real bend, so corners are taken round, not cut
         float left = fminf(15.0f, 7.0f + d->speed * 0.5f);
+        if (d->cross > 2) left = fmaxf(3.0f, left - d->cross * 1.5f);   // (the tester 2026-11-07: "strayed off route and hit a rock")
         const float *prev = vp; memcpy(pursuit, aim, 12);
         float dir0 = atan2f(aim[0] - vp[0], aim[2] - vp[2]);
         for (int k = b->wp; k < b->npts; k++) {
@@ -915,7 +990,12 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
         d->stuckYaw = yawNow;
         if (moved < 2.0f) {
             d->stuck++;
-            if (d->stuck >= 4) { g_driveGiveUps++; vehicle_exit(b, t, d, "stuck"); return 1; }
+            if (d->stuck >= 8) {   // (4 tries of backing up and turning was quick to give a car up: 8)
+                g_driveGiveUps++;
+                if (b->targetFlag >= 0) { g_crewCall[i].v = v; g_crewCall[i].at = t; g_crewCall[i].flag = b->targetFlag; crew_dismount(b, t, d, v, vp, b->targetFlag, toTarget, "stuck"); }
+                else vehicle_exit(b, t, d, "stuck");
+                return 1;
+            }
             int wasReversing = t < d->reverseUntil + 600;
             d->reverseUntil = wasReversing ? 0 : t + 2000 + d->stuck * 500;   // backing up didn't work either: try forwards
             d->reverseTurn = d->reverseTurn > 0 ? -1.0f : 1.0f;
@@ -945,12 +1025,14 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
     veh_calibrate(v, b->fwd, b->turn);
     err = wrap_pi(atan2f(aim[0] - vp[0], aim[2] - vp[2]) - drive_yaw(d, v, t));
     {   // driving trace: every 2 s per driver (first 400 lines a level), to see how drives go wrong
-        static unsigned traced;
-        if (t - d->traceAt > 2000 && traced++ < 400) {
+        static unsigned traced; static ULONGLONG traceMin;
+        if (t >= traceMin) { traceMin = t + 60000; traced = 0; }
+        if (t - d->traceAt > 2000 && traced < 30) {
+            traced++;
             d->traceAt = t;
-            H->log("drive: %s in %s at %.0f %.0f, route %d/%d, aim %.0f %.0f, heading %.2f err %.2f, moved %.1f m in %.1f s, stuck %d",
+            H->log("drive: %s in %s at %.0f %.0f, route %d/%d, aim %.0f %.0f, heading %.2f err %.2f, moved %.1f m in %.1f s, stuck %d, off the line %.1f m, speed %.1f, %s",
                    (char *)b->player + OFF_PLAYER_NAME, vehicle_name(v), vp[0], vp[2], b->wp, b->npts, aim[0], aim[2], drive_yaw(d, v, t), err,
-                   dist2d(vp, d->progressPos), (t - d->progressAt) / 1000.0, d->stuck);
+                   dist2d(vp, d->progressPos), (t - d->progressAt) / 1000.0, d->stuck, d->cross, d->speed, strictNet ? "drawn route" : "road map");
             void *rs = FIELD(b->player, 0x1648, void *);
             if (rs && !IsBadReadPtr(rs, 0x400)) { const float *sp = soldier_pos(rs); H->log("drive:   (driver's soldier at %.1f %.1f %.1f, car %.1f %.1f %.1f)", sp[0], sp[1], sp[2], vp[0], vp[1], vp[2]); }
         }
@@ -981,7 +1063,7 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
         float vwant = bend > 1.0f ? 6.0f : bend > 0.5f ? 10.0f : vmax;
         if (fabsf(err) > 1.0f) vwant = fminf(vwant, 6.0f);
         if (strictNet && d->queueGap < 26) vwant = fminf(vwant, fmaxf(0.0f, (d->queueGap - 9) * 0.7f));
-        if (strictNet && d->cross > 5) vwant = fminf(vwant, 7.0f);
+        if (strictNet && d->cross > 3) vwant = fminf(vwant, d->cross > 8 ? 7.0f : 11.0f);
         if (strictNet && d->footAhead < 10) vwant = fminf(vwant, 5.0f);
         if (d->freeC < 13.5f) vwant = fminf(vwant, d->freeC < 6 ? fmaxf(3.0f, d->freeC * 0.8f) : 8.0f);
         if (d->speed > vwant + 3.0f) b->fwd = (t / 200) % 2 && d->speed > 2.5f ? -0.6f : 0;
@@ -995,7 +1077,7 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
         d->edgeAt = t + 150;
         float yw = drive_yaw(d, v, t); int edge = 0;
         for (int r = 6; r <= 10 && !edge; r += 4) {
-            float a[3] = { vp[0] + sinf(yw) * r, vp[1] + 2.0f, vp[2] + cosf(yw) * r }, e[3] = { a[0], vp[1] - 1.0f - 0.45f * r, a[2] }, h[3];   // (a 29 degree slope down is still road)
+            float a[3] = { vp[0] + sinf(yw) * r, vp[1] + 2.0f + 0.7f * r, vp[2] + cosf(yw) * r }, e[3] = { a[0], vp[1] - 1.0f - 0.45f * r, a[2] }, h[3];   // (a 29 degree slope down is still road. Starts high enough for a 35 degree slope up: from 2 m over the car the ray began under the road on any hill - "no ground", back off)
             if (!ray_cast(a, e, h, NULL)) edge = r;
         }
         if (edge) {
@@ -1013,11 +1095,12 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
         d->lookAt = t + 150;
         float yaw = drive_yaw(d, v, t), free[3];
         for (int r = 0; r < 3; r++) {
-            float a = yaw + (r - 1) * 0.35f, nose = veh_nose(vehicle_name(v)), o[3] = { vp[0] + sinf(yaw) * nose, vp[1] + 0.7f, vp[2] + cosf(yaw) * nose }, e[3] = { o[0] + sinf(a) * 14, o[1], o[2] + cosf(a) * 14 }, h[3];
-            free[r] = ray_cast(o, e, h, NULL) ? dist2d(o, h) : 14;
+            float a = yaw + (r - 1) * 0.35f, nose = veh_nose(vehicle_name(v)), o[3] = { vp[0] + sinf(yaw) * nose, vp[1] + 0.7f, vp[2] + cosf(yaw) * nose }, e[3] = { o[0] + sinf(a) * 14, o[1], o[2] + cosf(a) * 14 }, h[3], hn[3];
+            // (the tester 2026-11-07: "afraid of going up slopes") a hit on ground that faces up (under 37 degrees) is the road rising, not a wall. (50 let a rounded rock read as road: "hit a rock")
+            free[r] = ray_cast(o, e, h, hn) && hn[1] < 0.8f ? dist2d(o, h) : 14;
             // and at roof height: garage beams and low ceilings a bumper ray passes under (the tester: "garages with beams")
             o[1] = e[1] = vp[1] + 1.7f;
-            if (ray_cast(o, e, h, NULL) && dist2d(o, h) < free[r]) free[r] = dist2d(o, h);
+            if (ray_cast(o, e, h, hn) && hn[1] < 0.8f && dist2d(o, h) < free[r]) free[r] = dist2d(o, h);
         }
         // Traffic: anyone ahead - a car (anyone's, driven or parked), a soldier on foot - within 14 m and 35 degrees of
         // the nose. Close (under 7 m): stop and wait (yield); further: steer to pass it on the side it isn't. Two bot
@@ -1212,6 +1295,7 @@ static void vspot_note(const char *nm, const float *p, float yaw)
     static unsigned logged; if (logged++ < 200) H->log("vspot: %s at %.1f %.1f %.1f (%d spot(s) on this map)", nm, p[0], p[1], p[2], g_vspotN);
 }
 
+static ULONGLONG g_vehLevelAt; static int g_vehLevelScans;
 static void vehicles_track(void)
 {
     static ULONGLONG at;
@@ -1291,6 +1375,10 @@ static void vehicles_track(void)
             hv[k] = g_knownVeh[k].v; memcpy(hvv[k], cur, sizeof cur);
         }
     }
+    {   // right after a level load: soon and again, while the bots are still at HQ
+        static const unsigned kAt[2] = { 2000, 6000 };
+        if (g_vehLevelAt && g_vehLevelScans < 2 && now_ms() - g_vehLevelAt >= kAt[g_vehLevelScans] && !g_vehScanBusy) { vehicle_scan_start(1); g_vehLevelScans++; }
+    }
     vehicle_scan_start(0);
     for (int k = 0; k < g_knownVehN; k++) {   // where each one is now (gone - destroyed, freed - when it stops reading as one)
         KnownVeh *kv = &g_knownVeh[k];
@@ -1302,7 +1390,8 @@ static void vehicles_track(void)
         else if (t - kv->seenAt > 10000) { g_knownVeh[k] = g_knownVeh[--g_knownVehN]; k--; }
     }
 }
-static void vehicles_level_reset(void) { g_knownVehN = 0; g_vehScanAt = now_ms() - 75000; /* a scan 15 s after the load */ }
+static void aimlearn_save(void);   // aimlearn.inc
+static void vehicles_level_reset(void) { aimlearn_save(); g_knownVehN = 0; g_vehScanAt = now_ms() - 75000; /* (the regular scan: 15 s after the load) */ g_vehLevelAt = now_ms(); g_vehLevelScans = 0; if (H->image) vehicle_class_note(H->image + 0x27a02e0); }
 
 // A bot on foot going to a flag over 120 m away: an empty known vehicle within 50 m (nobody else walking to it).
 // Returns its index (and claims it), or -1.
@@ -1313,6 +1402,19 @@ static void *vehicle_known_ptr(int k) { return k >= 0 && k < g_knownVehN ? g_kno
 static int soldier_seated(const float *pos)
 {
     for (int k = 0; k < g_knownVehN; k++) if (dist2d(pos, g_knownVeh[k].pos) < 2.8f && fabsf(pos[1] - g_knownVeh[k].pos[1]) < 2.5f) return k;
+    return -1;
+}
+// A soldier riding in a known vehicle, also one under way (0.3.13: only "standing still" counted, so a passenger in a moving car ran the on-foot code and looked where it would walk): beside its live position, at its speed
+static int soldier_riding(const float *pos, const float *vel)
+{
+    for (int k = 0; k < g_knownVehN; k++) {
+        if (dist2d(pos, g_knownVeh[k].pos) > 60) continue;
+        const float *vp = veh_pos(g_knownVeh[k].v);
+        if (!vp || dist2d(pos, vp) > 2.8f || fabsf(pos[1] - vp[1]) > 2.5f) continue;
+        float sv[3] = { 0, 0, 0 }; veh_lead(g_knownVeh[k].v, sv, 1, 1);
+        float dx = vel[0] - sv[0], dz = vel[2] - sv[2], a = vel[0] * vel[0] + vel[2] * vel[2];
+        if (a < 0.04f || dx * dx + dz * dz < 2.25f) return k;
+    }
     return -1;
 }
 static int vehicle_known_stopped_human(int k) { return k >= 0 && k < g_knownVehN && g_knownVeh[k].humanDriverTeam && g_knownVeh[k].still; }
@@ -1332,10 +1434,69 @@ static int vehicle_drivable_name(const char *nm)
     if (strstr(nm, "Object") || strstr(nm, "Radar") || strstr(nm, "Turret") || strstr(nm, "TURRET")) return 0;   // (the vehicle scan also finds gadgets: "RadarSweep_Object")
     return 1;
 }
+// (the tester 2026-11-07: "bots don't use the mounted MGs in helicopters": walking bots passed over any vehicle with someone in it, so the guns only ever had
+// who spawned there.) A teammate's helicopter still on the ground with seats free can be walked to: E takes the next free seat, and those are the guns.
+static float air_below(const float *p);
+static int heli_rideable(int k, int team, ULONGLONG t, const float *target)
+{
+    static struct { ULONGLONG at; int ok; } C[MAX_KNOWN_VEH];
+    KnownVeh *kv = &g_knownVeh[k];
+    int okNow = 0;
+    if (t >= C[k].at) {
+        C[k].at = t + 500;
+        int inside = 0, driverBot = -1, driver = 0, enemy = 0;
+        for (int j = 0; j < g_playerCount; j++) {
+            int seat = -1;
+            if (player_vehicle(g_players[j], &seat) != kv->v) continue;
+            if (FIELD(g_players[j], OFF_PLAYER_TEAM, int) != team) enemy = 1;
+            inside++;
+            if (seat == 0) { driver = 1; for (int o = 0; o < H->botCount; o++) if (H->bots[o] == g_players[j]) driverBot = o; }
+        }
+        int coming = 0;
+        for (int o = 0; o < H->botCount; o++) if (!g_bot[o].inVehicle && g_bot[o].boardHeli == kv->v && t - g_bot[o].boardHeliAt < 2000) coming++;
+        const char *nm = kv->name;
+        int seats = strstr(nm, "MOTORCYCLE") || strstr(nm, "ATTACK") ? 2 : strstr(nm, "TRANSPORT_HELI") ? 6 : 4;
+        int calm = name_is_air(nm) ? air_below(kv->pos) <= 5 : driverBot >= 0 ? (g_drv[driverBot].speed < 4 || t - g_drv[driverBot].startAt < 8000) : kv->still;
+        okNow = driver && !enemy && calm && inside + coming < seats;
+        C[k].ok = okNow;
+    } else okNow = C[k].ok;
+    (void)target;
+    return okNow;
+}
+// A car to fetch a trunk weapon from: nobody in it, within 30 m. "rear": where to stand, behind it.
+static int trunk_find(const float *pos, float *rear, void **car)
+{
+    ULONGLONG t = now_ms(); float bd = 30; int best = -1;
+    for (int k = 0; k < g_knownVehN; k++) {
+        KnownVeh *kv = &g_knownVeh[k];
+        if (kv->occupied || t - kv->seenAt > 3000 || name_is_air(kv->name) || is_boat_name(kv->name) || !strncmp(kv->name, "MSP", 3) || strstr(kv->name, "MOTORCYCLE") || !vehicle_drivable_name(kv->name)) continue;
+        float dd = dist2d(pos, kv->pos);
+        if (dd < bd && fabsf(kv->pos[1] - pos[1]) < 3) { bd = dd; best = k; }
+    }
+    if (best < 0) return 0;
+    void *v = g_knownVeh[best].v; float y = veh_yaw(v); const float *vp = veh_pos(v);
+    if (!vp) return 0;
+    rear[0] = vp[0] - sinf(y) * 3.2f; rear[1] = vp[1]; rear[2] = vp[2] - cosf(y) * 3.2f; *car = v;
+    return 1;
+}
 static void known_veh_skip(void *v, ULONGLONG until) { for (int k = 0; k < g_knownVehN; k++) if (g_knownVeh[k].v == v) g_knownVeh[k].skipUntil = until; }
+static unsigned g_vt[9];   // why a look for a vehicle ended: 0 walking back to its own, 1 holding for its flag, 2 flag close, 3 taken, 4 none suitable; cars passed over: 5 too far, 6 further from the flag, 7 no drawn route from it, 8 in use / claimed
+static void vehicle_take_stats(ULONGLONG t)
+{
+    static ULONGLONG at;
+    if (t < at) return;
+    if (at) {
+        int fr = 0, us = 0; for (int k = 0; k < g_knownVehN; k++) { if (g_knownVeh[k].occupied) us++; else if (t - g_knownVeh[k].seenAt < 3000 && vehicle_drivable_name(g_knownVeh[k].name)) fr++; }
+        int seated = 0; for (int k = 0; k < H->botCount; k++) seated += g_bot[k].inVehicle != 0;
+        H->log("vehtake: %d bots in vehicles, %d vehicles in use, %d free. Bot-looks: walking back %u, holding for a flag %u, flag close %u, took one %u, none suitable %u. Free vehicles passed over: too far %u, further from the flag %u, no drawn route %u, claimed %u",
+               seated, us, fr, g_vt[0], g_vt[1], g_vt[2], g_vt[3], g_vt[4], g_vt[5], g_vt[6], g_vt[7], g_vt[8]);
+    }
+    at = t + 60000; memset(g_vt, 0, sizeof g_vt);
+}
 static int vehicle_to_take(int i, const float *pos, const float *target, float *vpOut, const char **nameOut)
 {
     ULONGLONG t = now_ms();
+    vehicle_take_stats(t);
     if (!g_set.vehicles) return -1;
     vnet_sync(t);
     int team = FIELD(H->bots[i], OFF_PLAYER_TEAM, int);
@@ -1344,7 +1505,7 @@ static int vehicle_to_take(int i, const float *pos, const float *target, float *
         if (me->crewVeh && me->spawnAt > me->crewAt) me->crewVeh = NULL;   // (died since)
         if (me->crewVeh) {
             int f = me->crewFlag, taken = f >= 0 && f < g_cpCount && g_fi[f].ok && g_fi[f].owner == team;
-            if (!taken && t - me->crewAt <= 90000) return -1;
+            if (!taken && t - me->crewAt <= 90000) { g_vt[1]++; return -1; }
             const char *off = NULL; int kk = -1;
             for (int k = 0; k < g_knownVehN; k++) if (g_knownVeh[k].v == me->crewVeh) kk = k;
             if (t - me->crewAt > 180000) off = "too long";
@@ -1360,7 +1521,7 @@ static int vehicle_to_take(int i, const float *pos, const float *target, float *
             if (off) { if (cl++ < 80) H->log("drive: %s no reboard (%s)", (char *)H->bots[i] + OFF_PLAYER_NAME, off); me->crewVeh = NULL; }
             else {
                 if (!me->crewGo) { me->crewGo = 1; if (cl++ < 80) H->log("drive: %s reboard - walks back to the %s, %.0f m (%s)", (char *)H->bots[i] + OFF_PLAYER_NAME, g_knownVeh[kk].name, dist2d(pos, g_knownVeh[kk].pos), taken ? "flag taken" : "90 s up"); }
-                memcpy(vpOut, g_knownVeh[kk].pos, 12); *nameOut = g_knownVeh[kk].name;
+                g_vt[0]++; memcpy(vpOut, g_knownVeh[kk].pos, 12); *nameOut = g_knownVeh[kk].name;
                 return kk;
             }
         }
@@ -1376,22 +1537,27 @@ static int vehicle_to_take(int i, const float *pos, const float *target, float *
         return k;
     }
     float toFlag = dist2d(pos, target);
-    if (toFlag < (g_heliMode ? 60 : 80)) return -1;
-    int best = -1; float bd = 50;
+    if (toFlag < (g_heliMode ? 60 : 80)) { g_vt[2]++; return -1; }
+    int best = -1; float bd = toFlag > 150 ? 80 : 50;   // (a long way to go: worth walking further for a car)
     for (int k = 0; k < g_knownVehN; k++) {
         KnownVeh *kv = &g_knownVeh[k];
-        if (kv->occupied || (kv->claimedBy >= 0 && kv->claimedBy != i && t < kv->claimUntil) || t - kv->seenAt > 3000) continue;
-        if (!vehicle_drivable_name(kv->name)) continue;
+        int rideHeli = kv->occupied && heli_rideable(k, team, t, target);   // (a teammate's vehicle with seats free, on the ground and not under way: the tester 2026-11-07 "bots should enter vehicles as passengers")
+        if ((kv->occupied && !rideHeli) || t - kv->seenAt > 3000 || !vehicle_drivable_name(kv->name)) continue;
+        if (!rideHeli && kv->claimedBy >= 0 && kv->claimedBy != i && t < kv->claimUntil) { g_vt[8]++; continue; }
         if (g_bot[i].noVeh == kv->v && t < g_bot[i].noVehUntil) continue;
         int air = name_is_air(kv->name);
+        if (rideHeli && dist2d(pos, kv->pos) > 40) continue;
         if (air && (t < kv->skipUntil || dist2d(pos, kv->pos) > 80)) continue;   // (helicopters at base: walk up to 80 m for one, FloodBots)
         if (!air && toFlag < 80) continue;
-        if (dist2d(kv->pos, target) > toFlag + (air ? 30 : 0)) continue;   // not one that's further from the flag (a helicopter: 30 m of detour is fine)
-        if (!air && g_vnetN > 0) { static float tmp[BRAIN_PATH_MAX * 3]; if (!vnet_path(kv->pos, target, tmp, BRAIN_PATH_MAX)) continue; }   // (this map has saved vehicle routes: only trips they cover)
+        if (dist2d(pos, kv->pos) >= bd + (air ? 40 : 0)) { g_vt[5]++; continue; }
+        if (dist2d(kv->pos, target) > toFlag + 30) { g_vt[6]++; continue; }   // not one well away from the flag (30 m of detour is fine: at HQ the cars are often parked behind where bots spawn)
+        if (!rideHeli && !air && g_vnetN > 0) { static float tmp[BRAIN_PATH_MAX * 3]; if (!vnet_path(kv->pos, target, tmp, BRAIN_PATH_MAX)) { g_vt[7]++; continue; } }   // (this map has saved vehicle routes: only trips they cover)
         float d = dist2d(pos, kv->pos) - (air ? 40 : 0);   // (helicopters first)
         if (d < bd) { bd = d; best = k; }
     }
-    if (best >= 0 && g_knownVeh[best].claimedBy != i) { g_knownVeh[best].claimedBy = i; g_knownVeh[best].claimUntil = t + 20000; }
+    g_vt[best >= 0 ? 3 : 4]++;
+    if (best >= 0 && g_knownVeh[best].occupied) { g_bot[i].boardHeli = g_knownVeh[best].v; g_bot[i].boardHeliAt = t; }
+    else if (best >= 0 && g_knownVeh[best].claimedBy != i) { g_knownVeh[best].claimedBy = i; g_knownVeh[best].claimUntil = t + 20000; }
     if (best >= 0) { memcpy(vpOut, g_knownVeh[best].pos, 12); *nameOut = g_knownVeh[best].name; }
     return best;
 }

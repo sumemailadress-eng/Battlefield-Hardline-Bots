@@ -35,7 +35,13 @@ INSTALL (once)
 
 PLAY
 ----
-Easiest: double-click Thugbot-Control.bat. The window lets you:
+START HERE: double-click Thugbot-Launcher.bat. It starts everything, runs up to four servers and has the
+maps, modes and bot counts in one window. Updates and help: https://github.com/sumemailadress-eng/Battlefield-Hardline-Bots
+
+A server holds 64 players and the bots count: leave a slot for every person who will join (62 bots for two
+people). On a full server the next person to join just loads forever.
+
+The older control window is still there: double-click Thugbot-Control.bat. It lets you:
   - Start MySQL / the web server / everything the server needs (Services box)
   - Start, stop or restart the server with a number of bots per team (30 per team = 60 bots max)
   - Pick a map and mode and play it now, or edit the map rotation
@@ -43,8 +49,8 @@ Easiest: double-click Thugbot-Control.bat. The window lets you:
   - Find LAN games: lists every BF-Portable game on your network
   - Open the "learned map" page (what the bots know about the current map)
 
-Or double-click Start-Thugbot.bat. It starts BF-Portable, the Hardline Blaze emulator and the server
-with 60 bots. Other bot counts and your in-game name for the hotkeys:
+Start-Thugbot.bat on its own opens the launcher. From a command prompt, with arguments, it starts BF-Portable, the
+Hardline Blaze emulator and the server directly. Other bot counts and your in-game name for the hotkeys:
     Start-Thugbot.bat -Bots 24
 
 The first time, Start-Thugbot makes Battlefield_BFH_Server\!StartServer-Bots.bat from your own

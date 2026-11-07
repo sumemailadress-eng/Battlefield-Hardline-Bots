@@ -60,6 +60,7 @@ typedef struct Bot {
     unsigned seed;
     int inVehicle;                  // seated in a vehicle this frame (reverse / brake input allowed)
     ULONGLONG poolSince, poolCool, poolOutAt; int poolWet, poolLoops; float poolRim[3], poolBest, poolOutPos[3], poolOutRim[3];   // in a pool, heading for the rim to climb out
+    void *boardHeli; ULONGLONG boardHeliAt;   // walking to a teammate's helicopter on the ground (its pilot waits)
     int heliPilot;                  // flying a helicopter this frame: core.c's hook owns pitch, yaw and roll
     float roll, yawIn, throttleIn;  // extra analog inputs through the input hook (EIARoll, EIAYaw): aircraft
     // explore (no real progress for 12 s): walking an open direction picked by rays
@@ -81,6 +82,7 @@ static float air_below(const float *p);   // parachute.inc
 static int pool_exit(Bot *b, void *soldier, const float *pos, ULONGLONG t);   // pool.inc
 static int soldier_in_pit(const float *p);   // pool.inc
 static void jumps_level_reset(void);   // parachute.inc
+static void *g_apHoldV; static ULONGLONG g_apHoldUntil; static int g_apHoldKick;   // aimprobe.inc: a vehicle kept free of bots while a person measures its gun
 static void *g_kickVeh; static ULONGLONG g_kickUntil;   // "!out" (editor.inc): bots in that vehicle get out
 static int vehicle_known_stopped_human(int k);   // drive.inc
 static unsigned g_jitterTurn, g_jitterStrafe, g_jitterTurnFight, g_jitterSteer;   // jitter meter (perf)
@@ -114,12 +116,18 @@ static int parachute_tick(int i, Bot *b, void *soldier, const float *pos, ULONGL
 static void vehicles_level_reset(void);   // drive.inc
 static int vehicle_to_take(int i, const float *pos, const float *target, float *vpOut, const char **nameOut);
 static int name_is_air(const char *nm);   // drive.inc
+static int trunk_find(const float *pos, float *rear, void **car);   // drive.inc
+static int heli_ledge(int i, Bot *b, void *soldier, const float *pos, int team, ULONGLONG t);   // heli.inc
+static const float *veh_pos(void *v); static void veh_lead(void *v, float *q, float dist, float shotSpeed);   // drive.inc
+static int playarea_route_ok(const float (*pts)[3], int n); static int playarea_may_drop(int drop, int total, const char *what, const char *path);   // playarea.inc
 static void vehicle_onfoot_reset(int i);   // drive.inc
 static const char *vehicle_name(void *v);
 static int is_bot_player(void *pl);   // human_routes.inc
 static void vehicle_taken_note(void);
 static void *vehicle_known_ptr(int k);
 static int soldier_seated(const float *pos);
+static int soldier_riding(const float *pos, const float *vel);
+static int pax_think(int i, Bot *b, void *soldier, void *v, int team);
 static int vehicle_has_driver(int k);
 static void *player_vehicle(void *pl, int *seatOut);   // vehicles.inc
 static int vehicle_think(int i, Bot *b, void *v, int seat, int team);   // drive.inc
@@ -248,6 +256,7 @@ static void brain_level_reset(void)
     rescue_level_reset();
 }
 
+#include "playarea.inc"
 static void learn_open(void)
 {
     if (g_learn || !g_levelKey[0]) return;
@@ -264,6 +273,14 @@ static void learn_open(void)
         free(buf);
         fclose(f);
         bl_fade(g_learn);
+        {   // routes that leave the play area (a bot once wandered or fell out, a tester drove out)
+            int drop = 0;
+            for (int r = 0; r < g_learn->nRoutes; r++) if (!playarea_route_ok((const float (*)[3])g_learn->routes[r].pts, g_learn->routes[r].n)) drop++;
+            if (playarea_may_drop(drop, g_learn->nRoutes, "learned route(s)", path)) {
+                for (int r = g_learn->nRoutes - 1; r >= 0; r--) if (!playarea_route_ok((const float (*)[3])g_learn->routes[r].pts, g_learn->routes[r].n)) bl_delete(g_learn, 'r', r);
+                g_learn->dirty = 1;
+            }
+        }
     }
     g_learnSavedAt = now_ms();
 }
@@ -1173,6 +1190,7 @@ static void bot_think(int i)
     b->buttons = 0; b->why = "walking";
     int team = FIELD(player, OFF_PLAYER_TEAM, int);
     if (!b->alive) { b->alive = 1; memcpy(b->progressPos, pos, 12); b->progressAt = t; b->targetFlag = -1; b->route = -1; b->lroute = -1; routes_note_spawn(team, pos); b->spawnAt = t; memcpy(b->spawnPos, pos, 12); }
+    if (heli_ledge(i, b, soldier, pos, team, t)) { b->alive = 1; return; }
     memcpy(b->lastPos, pos, 12);
 
     choose_target(i, b, team, pos);
@@ -1280,7 +1298,7 @@ static void bot_think(int i)
     // (and fight from there), else get out - E and the change-vehicle key in turn.
     {
         const float *v = (const float *)((char *)soldier + OFF_SOLDIER_VELOCITY);
-        int k = (v[0] * v[0] + v[2] * v[2] < 0.04f) ? soldier_seated(pos) : -1;
+        int k = soldier_riding(pos, v);
         if (k >= 0 && !b->seatedSince) b->seatedSince = t;
         if (k < 0) b->seatedSince = 0;
         if (k >= 0 && t - b->seatedSince > 1500) {
@@ -1293,7 +1311,7 @@ static void bot_think(int i)
                 if (b->seatedStillSince && t - b->seatedStillSince > 3000) told = 1;
             }
             if (told) { b->noVeh = kv; b->noVehUntil = t + 30000; }
-            if (vehicle_has_driver(k) && !told) { b->why = "passenger"; combat_tick(i, b, soldier, team); b->fwd = b->strafe = 0; b->buttons |= BTN_LEAN; return; }
+            if (vehicle_has_driver(k) && !told) { b->why = "passenger"; b->buttons = 0; if (!pax_think(i, b, soldier, kv, team)) combat_tick(i, b, soldier, team); b->fwd = b->strafe = 0; b->buttons |= BTN_LEAN; return; }
             b->fwd = b->strafe = b->turn = 0;
             if ((t / 300) % 5 == 0) b->buttons |= ((t / 1500) & 1) ? BTN_EXIT : BTN_INTERACT;
             static unsigned logged;
@@ -1316,7 +1334,7 @@ static void bot_think(int i)
                 b->fwd = 0.2f; b->strafe = 0;
                 if ((t / 400) % 2 == 0) b->buttons |= vair ? BTN_INTERACT | BTN_EXIT : BTN_INTERACT;   // (the second hash a human's E sends: FloodBots)
                 b->why = "getting in a car";
-                if (!b->takingAt) { b->takingAt = t; vehicle_taken_note(); static unsigned logged; if (logged++ < 30) H->log("drive: %s takes the %s at %.0f %.0f", (char *)player + OFF_PLAYER_NAME, vname, vp[0], vp[2]); }
+                if (!b->takingAt) { b->takingAt = t; vehicle_taken_note(); static unsigned logged; if (logged++ < 400) H->log("drive: %s takes the %s at %.0f %.0f", (char *)player + OFF_PLAYER_NAME, vname, vp[0], vp[2]); }
                 return;
             }
             if (dist2d(b->target, vp) > 2) { memcpy(b->target, vp, 12); b->npts = 0; }

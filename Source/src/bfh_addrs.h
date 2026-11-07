@@ -48,6 +48,7 @@
 #define EIA_SWITCH_PRIMARY      0x7b48642f  // EIASwitchToPrimaryWeapon
 #define EIA_SELECT_WEAPON1      0x33ebbc13  // djb2-xor "EIASelectWeapon1" (6 uses in this exe; vehicle weapon 1: not seen live on Hardline)
 #define EIA_SELECT_WEAPON2      0x33ebbc10  // djb2-xor "EIASelectWeapon2" (6 uses in this exe; vehicle weapon 2: not seen live on Hardline)
+#define EIA_PICKUP              0x34e4ef1c  // djb2-xor "EIAPickUp" (ConceptPickUp): trunk weapons, not seen live
 #define EIA_SWITCH_STATIC       0xed46260d  // EIASwitchToStaticGadget (the class item: first aid / ammo kits - not yet confirmed live)
 
 // ---- Damage: BFServerSoldierHealthComponent::onDamage(this, DamageResult *ret, DamageInfo *info) (virtual) ----
@@ -55,6 +56,14 @@
 // the shooter's client) is dropped: blood shows, no health is lost. Bots have no client, so their bullets never count
 // unless we set that bit for them.
 #define RVA_SOLDIER_ON_DAMAGE    0x4570e0
+// Vehicles: same arguments. Nothing in them tests the client-confirmed flag (only soldier health and soldier physics do), so this is only for measuring.
+#define RVA_VEH_ON_DAMAGE_H      0x754170  // fb::ServerHavanaVehicleHealthComponent::onDamage
+#define RVA_VEH_ON_DAMAGE_H_VT   0x2474130 // its vtable slot
+#define RVA_VEH_ON_DAMAGE_B      0x1144230 // the base ServerVehicleHealthComponent one ("ServerVehiclePhysicsComponent_onDamage")
+#define RVA_VEH_ON_DAMAGE_B_VT   0x27a2690 // its vtable slot
+#define RVA_VEH_HEALTH_A         0x11416f0 // float (component): reads the health zones ([+0x70]); which of these is current and which is the maximum shows in the log
+#define RVA_VEH_HEALTH_B         0x1142d10
+#define OFF_DMG_AMOUNT           0x88      // float damage in DamageInfo
 #define RVA_SOLDIER_ON_DAMAGE_VT 0x23b2430 // the one vtable slot that holds it
 #define OFF_DMG_GIVER_INFO       0xb0      // DamageGiverInfo*: +0 -> weak ref -> (ServerPlayer + 8)
 #define OFF_DMG_FLAGS            0xbc      // bit 0: client-confirmed, bit 1: skips the check
@@ -118,6 +127,12 @@
 #define OFF_PLAYER_NAME         0x40      // inline char[] (what RCON listPlayers shows)
 #define OFF_PLAYER_SPECTATOR    0xce9     // byte
 #define OFF_PLAYER_TEAM         0xcec     // int 1 / 2 (matched against RCON listPlayers for all 16 bots)
+#define RVA_SPAWN_GO_CALL       0x461d31  // E8 call in the pseudo-player spawn (0x461a50): spawn(extent)
+#define RVA_SPAWN_GO            0x465fe0
+#define RVA_SPAWN_SET_SOLDIER   0x462090  // (extent, soldier or NULL): spawn on that soldier
+#define RVA_SPAWN_SET_VEHICLE   0x462310  // (extent, vehicle or NULL): spawn into that vehicle, 0x465580 -> spawnOnVehicle 0x466a40
+#define RVA_EXTENT_OFFSET       0x2efad50 // dword, set at runtime: extent = player + it
+#define OFF_PLAYER_VEHICLE      0x1668    // what the game's spawn passes as a player's vehicle (0x110a100)
 #define OFF_PLAYER_ENTRY_INDEX  0x1680    // int: seat (entry) index in the attached controllable
 #define OFF_PLAYER_SOLDIER      0x1688    // ServerSoldierEntity* (0 while dead)
 

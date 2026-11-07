@@ -57,6 +57,8 @@ static Settings g_set = { 2, 1, 0.3f, 1, 1, 0, 1 };
 static const Profile *P = &kProfiles[2];
 
 static int g_heliMode;   // drive.inc
+static int g_spawnSeatPctIni = 0;   // spawnseat.inc
+static int g_aimLearn = 1; static float g_aimLearnMax = 1;   // gun seats learn their aim (aimlearn.inc)
 static void settings_load(void)
 {
     char path[MAX_PATH], v[64];
@@ -97,7 +99,11 @@ static void settings_load(void)
     g_set.vehicles = GetPrivateProfileIntA("Thugbot", "Vehicles", 0, path);
     g_set.supplies = GetPrivateProfileIntA("Thugbot", "Supplies", 1, path);
     g_heliMode = GetPrivateProfileIntA("Thugbot", "HeliFly", THUGBOT_HELI_PORT, path) ? 2 : 0;   // (helicopter port: 0 pilots get out, else fly; needs Vehicles=1)
-    H->log("settings: ThugBot 0.3.1, heli port %s, heli mode %d", THUGBOT_HELI_PORT ? "built in" : "off by default", g_heliMode);
+    g_aimLearn = GetPrivateProfileIntA("Thugbot", "AimLearn", 1, path);
+    GetPrivateProfileStringA("Thugbot", "AimLearnMaxSkill", "1", v, sizeof v, path);
+    g_aimLearnMax = fmaxf(0, fminf(1, (float)atof(v)));
+    g_spawnSeatPctIni = GetPrivateProfileIntA("Thugbot", "SpawnInVehiclePercent", 0, path);
+    H->log("settings: ThugBot 0.3.13, aim learning %s (max skill %.2f), heli port %s, heli mode %d", g_aimLearn ? "on" : "off", g_aimLearnMax, THUGBOT_HELI_PORT ? "built in" : "off by default", g_heliMode);
     P = &kProfiles[g_set.difficulty];
     H->log("settings: %s - difficulty %s, aggression %d, defend share %.2f, combat %s, peek %s, vehicles %s, supplies %s", path, kProfileNames[g_set.difficulty],
            g_set.aggression, g_set.defendShare, g_set.combat ? "on" : "off (simple)", g_set.peek ? "on" : "off", g_set.vehicles ? "on" : "off", g_set.supplies ? "on" : "off");
@@ -394,6 +400,7 @@ typedef struct Fight {
     // locked heading
     ULONGLONG lastFireAt;
     ULONGLONG lockSince, lockActAt; float lockYaw; int locked, lockTry, lockAct;
+    float burstMul;   // learned burst length, for the burst it starts
 } Fight;
 static Fight g_fight[MAX_BOTS];
 static int pc_bot_ok(int i) { return g_fight[i].state == CS_IDLE && !g_fight[i].locked && g_fight[i].soldier && now_ms() - g_fight[i].hurtAt > 5000; }
@@ -666,14 +673,17 @@ static void lock_tick(int i, Bot *b, Fight *f, void *soldier)
     b->action = f->lockAct;
 }
 
+#include "aimlearn.inc"
+static unsigned g_hitsBy[MAX_BOTS];   // gunner_heli.inc
 // ---------------------------------------------------------------- the fight itself
 static void aim_at(Bot *b, Fight *f, void *soldier, void *enemySoldier, float d, float *yawErr, float *pitchErr)
 {
     const float *p = soldier_pos(soldier), *q = soldier_pos(enemySoldier);
     const float *v = (const float *)((char *)enemySoldier + OFF_SOLDIER_VELOCITY);
-    float lead = d / 600.0f + 0.08f, aim[3] = { q[0] + v[0] * lead, q[1] + (f && f->aimH > 0 ? f->aimH : 1.15f), q[2] + v[2] * lead };
+    AimLearn *sal = al_soldier(); const AimBand *sb = sal ? &sal->b[al_band(d)] : NULL;
+    float lead = (d / 600.0f + 0.08f) * (sb ? sb->v[0] : 1), aim[3] = { q[0] + v[0] * lead, q[1] + (f && f->aimH > 0 ? f->aimH : 1.15f) + (sb ? sb->v[1] : 0), q[2] + v[2] * lead };
     float eye[3] = { p[0], p[1] + 1.6f, p[2] };
-    float want = atan2f(aim[0] - eye[0], aim[2] - eye[2]), err = wrap_pi(want - soldier_yaw(soldier));
+    float want = atan2f(aim[0] - eye[0], aim[2] - eye[2]) + (sb ? sb->v[2] : 0), err = wrap_pi(want - soldier_yaw(soldier));
     b->turn = turn_input(soldier_yaw(soldier), want, P->turnGain);
     // Fine aim at range: the plain gain turns too slowly for the last half metre (aimlog, 2026-10-24: 0.5 - 0.9 m off at
     // 30 - 50 m, turn input 0.05) - a small error gets a firmer correction.
@@ -699,7 +709,8 @@ static void fire_control(Bot *b, Fight *f, float d, float yawErr, float pitchErr
     float yawK = d < 12 ? 2.5f : d < 30 ? 1.6f : 1.0f, pitchK = d < 12 ? 4.0f : 2.0f;
     if (fabsf(yawErr) * fmaxf(d, 1) > margin * yawK || fabsf(pitchErr) * fmaxf(d, 1) > margin * pitchK) { f->burstEnd = 0; return; }
     if (t < f->pauseEnd) return;
-    if (!f->burstEnd) { f->burstEnd = t + (ULONGLONG)(P->burstMs * (d > 60 ? 0.5f : 1.0f)); g_cStats[0]++; }
+    { AimLearn *sal = al_soldier(); if (!f->burstEnd) f->burstMul = sal ? sal->b[al_band(d)].v[3] : 1; }
+    if (!f->burstEnd) { f->burstEnd = t + (ULONGLONG)(P->burstMs * f->burstMul * (d > 60 ? 0.5f : 1.0f)); g_cStats[0]++; }
     if (t < f->burstEnd) {
         // Release every 4th frame in a burst: semi-automatic guns fire on each press, automatic ones barely notice.
         if ((H->frame & 3) != 3) { b->buttons |= BTN_FIRE; f->lastFireAt = t; g_fireFrames++; }
@@ -1075,9 +1086,122 @@ static void combat_tick_inner(int i, Bot *b, void *soldier, int team)
     if (why && !(g_set.aggression == 2 && d < 8)) go_cover(i, f, soldier, why);
 }
 
+// Soldiers only ever target soldiers on foot: anyone in a vehicle counted as nobody (player_alive_enemy). the tester 2026-11-07: "no one shoots at helicopters",
+// "I'm sitting in a car and enemies aren't shooting at me". A soldier with nothing else to fight, half of them by seed, stops and shoots at an enemy
+// vehicle in plain sight, a helicopter in the air within 180 m or anything else within 110 m: 8 s, then at least 20 s of getting on with things.
+// One in three of those starts with the launcher (a launch every 60+ s, gear_tick; a bot without one just fires once and switches back).
+static struct { void *tgt; ULONGLONG scanAt, until, nextAt; } g_aa[MAX_BOTS];
+static unsigned g_aaAir, g_aaGround, g_aaFire;
+// Trunk launcher (experiment, the tester 2026-11-07: "car trunks have rocket launchers with lock on"). One in three of the bots shooting at a vehicle, with an empty car
+// within 30 m: walks behind it, taps E (the launcher equips itself), then for 45 s holds zoom on the target for 2.5 s (the lock) and fires. What the game does with that
+// isn't known yet: no way to read the weapon in hand here, and E can also just get it into the car.
+static struct { void *car; float rear[3]; ULONGLONG walkUntil, pressAt, haveUntil, nextAt, lockAt; } g_trunk[MAX_BOTS];
+static void aa_tick(int i, Bot *b, void *soldier, int team)
+{
+    Fight *f = &g_fight[i];
+    ULONGLONG t = now_ms();
+    // (the tester 2026-11-07: "NO ONE IS SHOOTING AT VEHICLES": idle bots only and half of them gave 2 ground vehicle engagements in 8 minutes.) Every soldier now, and a
+    // soldier in a fight too when the vehicle is nearer than the soldier it is fighting.
+    if (!g_set.combat || g_gear[i].kind != GS_NONE) { g_aa[i].tgt = NULL; return; }
+    float fightD = 1e9f;
+    if (f->target && player_alive_enemy(f->target, team)) { void *fs = bot_soldier(f->target); if (fs) fightD = dist2d(soldier_pos(soldier), soldier_pos(fs)); }
+    const float *p = soldier_pos(soldier);
+    float eye[3] = { p[0], p[1] + 1.6f, p[2] };
+    if (!g_aa[i].tgt) {
+        if (t < g_aa[i].nextAt || t < g_aa[i].scanAt) return;
+        g_aa[i].scanAt = t + 400 + (b->seed % 200);
+        // (every enemy aircraft, listed once for a few frames: not a walk over all players for each bot)
+        static struct { void *pl, *v; int team; } air[32]; static int airN; static ULONGLONG airAt;
+        if (t >= airAt) {
+            airAt = t + 200; airN = 0;
+            for (int j = 0; j < g_playerCount && airN < 32; j++) {
+                void *v = player_vehicle(g_players[j], NULL);
+                if (!v) continue;
+                int dup = 0; for (int q = 0; q < airN; q++) dup |= air[q].v == v;
+                if (!dup) { air[airN].pl = g_players[j]; air[airN].v = v; air[airN].team = FIELD(g_players[j], OFF_PLAYER_TEAM, int); airN++; }
+            }
+        }
+        float bd = 180;
+        for (int k = 0; k < airN; k++) {
+            if (!air[k].team || air[k].team == team) continue;
+            const float *q = veh_pos(air[k].v);
+            if (!q) continue;
+            int isAir = name_is_air(vehicle_name(air[k].v));
+            if (isAir && q[1] - p[1] < 6) continue;   // (parked, or low: not an air target)
+            float d = dist2d(p, q);
+            if (d >= bd || d >= fightD || (!isAir && (d > 150 || fabsf(q[1] - p[1]) > 25))) continue;
+            float hit[3], to[3] = { q[0], q[1], q[2] };
+            if (ray_cast(eye, to, hit, NULL)) { float dx = hit[0] - q[0], dy = hit[1] - q[1], dz = hit[2] - q[2]; if (dx * dx + dy * dy + dz * dz > 100) continue; }
+            bd = d; g_aa[i].tgt = air[k].pl;
+        }
+        if (!g_aa[i].tgt) return;
+        g_aa[i].until = t + 10000; g_aa[i].nextAt = t + 14000;
+        { void *cv = player_vehicle(g_aa[i].tgt, NULL); if (cv && name_is_air(vehicle_name(cv))) g_aaAir++; else g_aaGround++; }
+        static ULONGLONG la; if (t >= la) { la = t + 3000; void *lv = player_vehicle(g_aa[i].tgt, NULL); H->log("aa: %s shoots at a %s %.0f m away", (char *)b->player + OFF_PLAYER_NAME, lv ? vehicle_name(lv) : "vehicle", bd); }
+    }
+    void *ev = player_vehicle(g_aa[i].tgt, NULL);
+    const float *q = ev ? veh_pos(ev) : NULL;
+    if (!q || t > g_aa[i].until) { g_aa[i].tgt = NULL; return; }
+    float aim[3] = { q[0], q[1] + (name_is_air(vehicle_name(ev)) ? 0.0f : 1.0f), q[2] }, d = dist2d(eye, aim);
+    if (d >= fightD) { g_aa[i].tgt = NULL; return; }   // (a soldier came nearer)
+    veh_lead(ev, aim, d, 600);
+    if ((b->seed >> 11) % 3 == 0) {
+        void *tc = NULL; float rear[3];
+        if (g_trunk[i].car) {   // on the way, or pressing
+            if (t > g_trunk[i].walkUntil) { g_trunk[i].car = NULL; g_trunk[i].nextAt = t + 90000; }
+            else {
+                float dr = dist2d(p, g_trunk[i].rear);
+                b->turn = turn_input(soldier_yaw(soldier), atan2f(g_trunk[i].rear[0] - p[0], g_trunk[i].rear[2] - p[2]), 3.0f);
+                b->strafe = 0; b->pitch = 0; b->buttons &= ~BTN_FIRE; g_aa[i].until = t + 4000; b->why = "going to a car's trunk"; b->progressAt = t; memcpy(b->progressPos, p, 12);
+                if (dr > 1.4f && !g_trunk[i].pressAt) { b->fwd = 1; return; }
+                b->fwd = 0;
+                if (!g_trunk[i].pressAt) g_trunk[i].pressAt = t;
+                if (t - g_trunk[i].pressAt < 300) b->buttons |= BTN_INTERACT;   // (one tap: the launcher equips itself - the tester 2026-11-07)
+                if (t - g_trunk[i].pressAt > 800) { g_trunk[i].car = NULL; g_trunk[i].pressAt = 0; g_trunk[i].haveUntil = t + 45000; g_trunk[i].nextAt = t + 120000; g_trunk[i].lockAt = 0; static unsigned tl; if (tl++ < 60) H->log("trunk: %s pressed E at a car's trunk", (char *)b->player + OFF_PLAYER_NAME); }
+                return;
+            }
+        } else if (t >= g_trunk[i].nextAt && t > g_trunk[i].haveUntil && trunk_find(p, rear, &tc)) {
+            g_trunk[i].car = tc; memcpy(g_trunk[i].rear, rear, 12); g_trunk[i].walkUntil = t + 12000; g_trunk[i].pressAt = 0; g_trunk[i].nextAt = t + 120000;
+            static unsigned tl; if (tl++ < 60) H->log("trunk: %s goes to a car's trunk for a launcher", (char *)b->player + OFF_PLAYER_NAME);
+            return;
+        }
+    }
+    GearUse *g = &g_gear[i];
+    if (d > 25 && d < 150 && t >= g->next && (b->seed >> 9) % 3 == 0) {
+        static ULONGLONG lastAny;
+        if (t - lastAny >= 1000) { lastAny = t; g->kind = GS_LAUNCHER; g->at = t; g->next = t + 60000 + (b->seed % 20000); memcpy(g->to, aim, 12); return; }
+    }
+    float want = atan2f(aim[0] - eye[0], aim[2] - eye[2]), err = wrap_pi(want - soldier_yaw(soldier));
+    b->fwd = b->strafe = 0; b->buttons &= ~BTN_SPRINT;
+    b->turn = turn_input(soldier_yaw(soldier), want, P->turnGain);
+    float el = view_elevation(soldier), perr = 0;
+    if (el == el) { perr = atan2f(aim[1] - eye[1], fmaxf(0.5f, d)) - el; b->pitch = fmaxf(-1, fminf(1, g_pvUp * perr * 3.0f)); }
+    if (t < g_trunk[i].haveUntil) {   // holding a trunk launcher (it should be): zoom, stay on target 2.5 s, fire
+        b->buttons |= BTN_ZOOM;
+        if (fabsf(err) * fmaxf(d, 1) < 6 && fabsf(perr) * fmaxf(d, 1) < 6) { if (!g_trunk[i].lockAt) g_trunk[i].lockAt = t; } else g_trunk[i].lockAt = 0;
+        if (g_trunk[i].lockAt && t - g_trunk[i].lockAt > 2500) b->buttons |= BTN_FIRE;
+        if (g_trunk[i].lockAt && t - g_trunk[i].lockAt > 3200) g_trunk[i].lockAt = 0;
+    } else
+    if (fabsf(err) * fmaxf(d, 1) < 4 && fabsf(perr) * fmaxf(d, 1) < 4 && (t % 1600) < 1000 && (H->frame & 3) != 3) { b->buttons |= BTN_FIRE; g_aaFire++; }
+    { static ULONGLONG at; if (t >= at) { if (at) H->log("aa: last minute: %u soldiers took on a ground vehicle, %u a helicopter, %u frames of fire", g_aaGround, g_aaAir, g_aaFire); at = t + 60000; g_aaGround = g_aaAir = g_aaFire = 0; } }
+    b->why = "shooting at a vehicle";
+    b->progressAt = t; memcpy(b->progressPos, p, 12);
+}
 static void combat_tick(int i, Bot *b, void *soldier, int team)
 {
     combat_tick_inner(i, b, soldier, team);
+    aa_tick(i, b, soldier, team);
+    {   // learned aim: what this soldier's shots did. All soldiers share the settings, so a trial runs over 60 s of fire added up
+        static unsigned hitsSeen[MAX_BOTS]; static ULONGLONG lastAt[MAX_BOTS];
+        ULONGLONG tn = now_ms(); float dtA = lastAt[i] ? (tn - lastAt[i]) / 1000.0f : 0; if (dtA > 0.2f) dtA = 0.2f; lastAt[i] = tn;
+        unsigned got = g_hitsBy[i] >= hitsSeen[i] ? g_hitsBy[i] - hitsSeen[i] : 0; hitsSeen[i] = g_hitsBy[i];
+        Fight *f0 = &g_fight[i];
+        if (f0->target && player_alive_enemy(f0->target, team)) {
+            void *es = bot_soldier(f0->target);
+            if (es) al_tick(al_soldier(), al_band(dist2d(soldier_pos(soldier), soldier_pos(es))), (b->buttons & BTN_FIRE) != 0, dtA, got, 60);
+        }
+        if (tn - g_alSavedAt > 180000) aimlearn_save();
+    }
     // Standing to fight, dodging or holding cover is not being stuck: keep brain.inc's progress check quiet.
     Fight *f = &g_fight[i];
     if (g_set.combat && (f->state == CS_COVER_HOLD || f->state == CS_FIGHT || pc_running(i))) {

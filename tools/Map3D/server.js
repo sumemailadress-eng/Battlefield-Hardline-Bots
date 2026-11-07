@@ -279,7 +279,12 @@ const server = http.createServer((req, res) => {
         if (u.pathname === '/api/texinfo' && map) { const t = read(path.join(__dirname, 'textures', map + '.json')); return send(res, 200, 'application/json', t || 'null'); }
         if (u.pathname === '/api/teximg' && map) return send(res, 200, 'image/jpeg', fs.readFileSync(path.join(__dirname, 'textures', map + '.jpg')));
         if (u.pathname === '/api/roads' && map) return send(res, 200, 'application/octet-stream', roadData(map));
-        if (u.pathname === '/api/overhead' && map) return send(res, 200, 'application/json', JSON.stringify(overheadData(map)));
+        if (u.pathname === '/api/playarea' && map) {   // the play area per mode: Thugbot_learned\\<map>.playarea (re\\scripts\\fb_playarea.py)
+    const modes = {}; const txt = read(path.join(LEARN, map + '.playarea'));
+    if (txt) txt.split(/\r?\n/).forEach(l => { const w = l.trim().split(/\s+/); if (w[0] !== 'area' || w.length < 3) return; const n = +w[2], pts = []; for (let k = 0; k < n; k++) pts.push([+w[3 + k * 2], +w[4 + k * 2]]); (modes[w[1]] = modes[w[1]] || []).push(pts); });
+    return send(res, 200, 'application/json', JSON.stringify(modes));
+}
+if (u.pathname === '/api/overhead' && map) return send(res, 200, 'application/json', JSON.stringify(overheadData(map)));
         if (u.pathname === '/api/cloud' && map) return send(res, 200, 'application/octet-stream', buildCloud(map));
         if (u.pathname === '/api/routes' && map && req.method === 'GET') return send(res, 200, 'application/json', JSON.stringify({ ...loadRoutes(map), ...reportData(map), live: liveMap() === map }));
         if (u.pathname === '/api/routes' && map && req.method === 'POST') {
