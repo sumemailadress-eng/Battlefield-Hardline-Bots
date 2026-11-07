@@ -1,6 +1,21 @@
 ThugBot patch notes
 ===================
 
+V0.4.2 early release (2026-11-07)
+---------------------------------
+NOT PLAY-TESTED: everything below was compiled but not played yet.
+
+- Getting into vehicles: bots run to a vehicle within 60 m. From 6 m they go to a door point beside it (front and
+  back, both sides; further out for helicopters), press E from 2.5 m, try the next door every 3 s and give up
+  after 12 s. Before, they crept up to the middle at a fifth of walking speed and gave up after 4 s, so they often
+  never got in, and no bot boarded a helicopter on foot.
+- They only try to get in on the vehicle's own level, not from a floor below a helicopter on a roof.
+- Helicopters on roofs: bots plan their way up over what they have learned of the map, including stairs, lifts and
+  windows. If they find no way up in 25 s they leave it for 3 minutes, and the log ("roofheli:") names the map. Walk
+  from the street to the roof once (knife the windows on the way) and the bots learn that way up.
+- Learned map data as saved on the test server. Routes walked to the roof helicopters on Riptide (mp_offshore) in the
+  last hour may not be in it yet.
+
 V0.4 early release (2026-11-07)
 -------------------------------
 Vehicles are still NOT officially supported and bots stay on foot by default (Vehicles=0). Turn vehicles on in the

@@ -44,6 +44,7 @@ typedef struct Bot {
     ULONGLONG takingAt;             // pressing E at a car it is taking
     void *crewVeh; int crewFlag, crewGo; ULONGLONG crewAt; float crewPos[3];   // the vehicle it left to walk to a flag: only ever compared, never read
     void *noVeh; ULONGLONG noVehUntil;   // a car it couldn't get into (4 s of E): left alone for a minute
+    void *roofVeh; ULONGLONG roofAt, roofSince; float roofPos[3];   // a helicopter above it (on a roof) it is walking to
     ULONGLONG seatedSince, seatedStillSince;   // standing still inside a known car (a passenger seat); the car stopped too
     ULONGLONG slowSince, slideUntil; float slideStrafe; int slides;   // scraping along a wall
     float flank[3]; int flankFlag; ULONGLONG flankUntil;   // flanking point on the way to flankFlag
@@ -129,6 +130,7 @@ static void *vehicle_known_ptr(int k);
 static int soldier_seated(const float *pos);
 static int soldier_riding(const float *pos, const float *vel);
 static int vehicle_known_has(void *v);
+static const float *vehicle_xf(void *v);   // drive.inc
 static int pax_think(int i, Bot *b, void *soldier, void *v, int team);
 static void human_gun_hit(void *giver, const float *victim, const char *what);   // gunner_heli.inc
 static int vehicle_has_driver(int k);
@@ -1330,22 +1332,52 @@ static void bot_think(int i)
     if (b->targetFlag >= 0 && g_fight[i].state == CS_IDLE && !b->enemy) {
         float vp[3]; const char *vname = "";
         int k = vehicle_to_take(i, pos, b->target, vp, &vname);
-        if (k >= 0 && b->takingAt && t - b->takingAt > 4000) {   // E did nothing (full, locked, wrong side): give up on it
+        // (the tester 2026-11-07: "when I'm sitting still in a vehicle, they walk slowly towards the car and never enter"; no helicopter was boarded on foot all day) Within 3.5 m of the
+        // centre a bot crept at a fifth of walking speed pressing E, and gave up after 4 s. Now: from 6 m it goes to a door - one of four points beside the vehicle (1.5 m out,
+        // 2.4 for a helicopter, front and back of the middle), the nearest first, the next every 3 s - presses E from 2.5 m of it, and gives up after 12 s. It runs there.
+        if (k >= 0 && b->takingAt && t - b->takingAt > 12000) {   // E did nothing at any door (full, locked): give up on it
             b->noVeh = vehicle_known_ptr(k); b->noVehUntil = t + 60000; b->takingAt = 0; k = -1;
+            static unsigned gl; if (gl++ < 60) H->log("drive: %s couldn't get into the %s after 12 s at its doors", (char *)player + OFF_PLAYER_NAME, vname);
         }
         if (k >= 0) {
             int vair = name_is_air(vname);
-            if (dist2d(pos, vp) < (vair ? 5.0f : 3.5f)) {   // (a helicopter's centre is further from its door)
-                b->turn = turn_input(soldier_yaw(soldier), atan2f(vp[0] - pos[0], vp[2] - pos[2]), 3.0f);
-                b->fwd = 0.2f; b->strafe = 0;
-                if ((t / 400) % 2 == 0) b->buttons |= vair ? BTN_INTERACT | BTN_EXIT : BTN_INTERACT;   // (the second hash a human's E sends: FloodBots)
-                b->why = "getting in a car";
+            if (dist2d(pos, vp) < 6.0f && fabsf(pos[1] - vp[1]) < 3.5f) {   // (and on its level: a roof helicopter is overhead from the floors below)
                 if (!b->takingAt) { b->takingAt = t; vehicle_taken_note(); static unsigned logged; if (logged++ < 400) H->log("drive: %s takes the %s at %.0f %.0f", (char *)player + OFF_PLAYER_NAME, vname, vp[0], vp[2]); }
+                float ep[3]; memcpy(ep, vp, 12);
+                void *vv = vehicle_known_ptr(k); const float *m = vv ? vehicle_xf(vv) : NULL;
+                if (m) {
+                    float rx = m[0], rz = m[2], fx = m[8], fz = m[10], rl = sqrtf(rx * rx + rz * rz), fl = sqrtf(fx * fx + fz * fz);
+                    if (rl > 0.1f && fl > 0.1f) {
+                        rx /= rl; rz /= rl; fx /= fl; fz /= fl;
+                        float side = vair ? 2.4f : 1.5f, along = vair ? 0.8f : 0.6f, pts[4][2]; int ord[4] = { 0, 1, 2, 3 };
+                        for (int q = 0; q < 4; q++) { float sd = (q & 1) ? -side : side, al = (q & 2) ? -along : along; pts[q][0] = vp[0] + rx * sd + fx * al; pts[q][1] = vp[2] + rz * sd + fz * al; }
+                        for (int a = 0; a < 4; a++) for (int z = a + 1; z < 4; z++) {
+                            float da = (pts[ord[a]][0] - pos[0]) * (pts[ord[a]][0] - pos[0]) + (pts[ord[a]][1] - pos[2]) * (pts[ord[a]][1] - pos[2]);
+                            float dz = (pts[ord[z]][0] - pos[0]) * (pts[ord[z]][0] - pos[0]) + (pts[ord[z]][1] - pos[2]) * (pts[ord[z]][1] - pos[2]);
+                            if (dz < da) { int tq = ord[a]; ord[a] = ord[z]; ord[z] = tq; }
+                        }
+                        static int door[MAX_BOTS]; static ULONGLONG doorAt[MAX_BOTS];
+                        if (t - b->takingAt < 100) { door[i] = ord[0]; doorAt[i] = t; }   // the nearest door first
+                        else if (t - doorAt[i] > 3000) { int cur = 0; while (cur < 4 && ord[cur] != door[i]) cur++; door[i] = ord[(cur + 1) % 4]; doorAt[i] = t; }
+                        ep[0] = pts[door[i]][0]; ep[2] = pts[door[i]][1];
+                    }
+                }
+                float de = dist2d(pos, ep);
+                if (de > 0.9f) { b->turn = turn_input(soldier_yaw(soldier), atan2f(ep[0] - pos[0], ep[2] - pos[2]), 3.0f); b->fwd = de > 2.0f ? 1.0f : 0.6f; }
+                else { b->turn = turn_input(soldier_yaw(soldier), atan2f(vp[0] - pos[0], vp[2] - pos[2]), 3.0f); b->fwd = 0; }
+                b->strafe = 0;
+                if (de < 2.5f && (t / 200) % 2 == 0) b->buttons |= vair ? BTN_INTERACT | BTN_EXIT : BTN_INTERACT;   // (the second hash a human's E sends: FloodBots)
+                b->why = "getting in a car";
                 return;
             }
             if (dist2d(b->target, vp) > 2) { memcpy(b->target, vp, 12); b->npts = 0; }
-        } else b->takingAt = 0;
-    }
+            if (dist2d(pos, vp) < 60.0f) b->buttons |= BTN_SPRINT;   // (runs to it)
+            // (the tester 2026-11-07: "there are choppers on roofs, make bots route there - stairs inside the buildings, sometimes knife windows") The planner takes it there over the
+            // grid and the learned routes (stairs, lifts and glass included). A helicopter 4 m+ above the bot: watched, below.
+            if (vp[1] - pos[1] > 4.0f) { void *rv = vehicle_known_ptr(k); if (b->roofVeh != rv) { b->roofVeh = rv; b->roofSince = t; b->roofAt = 0; memcpy(b->roofPos, vp, 12); } }
+            else b->roofVeh = NULL;
+        } else { b->takingAt = 0; b->roofVeh = NULL; }
+    } else b->roofVeh = NULL;
 
     // Unsticking: back off and strafe for a moment, then replan.
     // Unsticking: back up and away to the roomier side for most of it, then sidestep; then plan again. (Backing up used to
@@ -1363,6 +1395,18 @@ static void bot_think(int i)
     else if (b->escapeUntil) { b->escapeUntil = 0; b->npts = 0; b->planAt = 0; }
 
     plan(i, b, pos);
+    if (b->roofVeh && t >= b->roofAt) {   // roof helicopter: does the plan reach its roof? Logged now and then; no way up after 25 s - left alone for 3 min, and the map noted for a drawn route
+        b->roofAt = t + 8000;
+        const float *end = b->npts ? &b->path[(b->npts - 1) * 3] : NULL;
+        int up = end && fabsf(end[1] - b->roofPos[1]) < 4 && dist2d(end, b->roofPos) < 10;
+        static unsigned rl; if (rl++ < 200) H->log("roofheli: %s to the %s %.0f m up at %.0f %.0f: %s (%d waypoints, the plan ends %.1f m below it, %.0f m from it)", (char *)player + OFF_PLAYER_NAME,
+            vehicle_name(b->roofVeh), b->roofPos[1] - pos[1], b->roofPos[0], b->roofPos[2], up ? "the route reaches its roof" : end ? "the route doesn't reach the roof" : "no route", b->npts,
+            end ? b->roofPos[1] - end[1] : 0.0f, end ? dist2d(end, b->roofPos) : 0.0f);
+        if (!up && t - b->roofSince > 25000) {
+            b->noVeh = b->roofVeh; b->noVehUntil = t + 180000; b->roofVeh = NULL; b->npts = 0; b->planAt = 0;
+            static char said[96]; if (strcmp(said, g_levelKey)) { snprintf(said, sizeof said, "%s", g_levelKey); H->log("roofheli: on %s bots find no way up to a roof helicopter - walk or draw a route from the street to the roof (the bots learn it)", g_levelKey); }
+        }
+    }
     const float *aim = b->target;
     // (2.2 m: at 1.6 bots circled points they had all but reached, flipping left / right.) And on the same floor: in
     // Downtown's garage the route ran along the level below - bots "reached" each point from the floor above it, then
