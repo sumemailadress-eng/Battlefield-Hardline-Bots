@@ -1,4 +1,4 @@
-# Thugbot Control: a small window to run the Hardline bot server. Start / stop it with a number of bots per team, pick a
+﻿# Thugbot Control: a small window to run the Hardline bot server. Start / stop it with a number of bots per team, pick a
 # map and mode and switch to it now, edit the map rotation, restart or end the round, and open the learned map.
 # Talks to the server over RCON (the port and password from !StartServer-Bots.bat). Run Thugbot-Control.bat.
 # Also starts the backend (MySQL, the web server with the server-list API, the Hardline Blaze emulator) and finds the
@@ -250,16 +250,13 @@ function Svc-Text {
 }
 function Start-MySql {
     if (Get-Process mysqld -ErrorAction SilentlyContinue) { Say 'MySQL is already running.'; return $true }
-    $exe = Join-Path $xampp 'mysql\bin\mysqld.exe'
-    if (-not (Test-Path $exe)) { Say "MySQL not found: $exe"; return $false }
-    # same as xampp\mysql_start.bat (run from the xampp folder: the ini path is relative), without its console window
-    Start-Process -FilePath $exe -ArgumentList '--defaults-file=mysql\bin\my.ini', '--standalone' -WorkingDirectory $xampp -WindowStyle Hidden | Out-Null
-    for ($i = 0; $i -lt 20; $i++) {
-        Start-Sleep -Milliseconds 500
-        try { $c = New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1', 3306); $c.Close(); Say 'MySQL started.'; Svc-Text; return $true } catch {}
-        if (-not (Get-Process mysqld -ErrorAction SilentlyContinue)) { break }
-    }
-    Say 'MySQL did not come up (see xampp\mysql\data\*.err, or Repair-MySQL-Privileges.bat).'; Svc-Text; return $false
+    # Never start mysqld hidden: with no console its log lines get written into the privilege tables and corrupt them.
+    # Start-MySQL-Safe.ps1 checks/repairs the system tables, then starts it via xampp\mysql_start.bat in its own window.
+    Say 'Checking and starting MySQL...'
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Start-MySQL-Safe.ps1') -Portable $Portable 2>&1 | Out-String
+    $ok = ($LASTEXITCODE -eq 0)
+    foreach ($l in ($out -split "`r?`n" | Where-Object { $_.Trim() })) { Say $l }
+    Svc-Text; return $ok
 }
 function Start-Web {
     if (Get-Process httpd -ErrorAction SilentlyContinue) { Say 'The web server is already running.'; return }

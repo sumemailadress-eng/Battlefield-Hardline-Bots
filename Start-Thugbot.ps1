@@ -31,6 +31,10 @@ function Start-IfMissing([string]$name, [string]$exe, [string]$dir) {
 
 if (Get-Process bfh_server_Final -ErrorAction SilentlyContinue) { throw 'A Hardline server is already running. Close it first.' }
 
+# MySQL first, the safe way (tables checked, own console window) so nothing starts it hidden and corrupts it
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Start-MySQL-Safe.ps1') -Portable $Portable
+if ($LASTEXITCODE -ne 0) { throw 'MySQL did not start - see xampp\mysql\data\mysql_error.log' }
+
 Start-IfMissing 'PortableBF' (Join-Path $Portable 'PortableBF.exe') $Portable
 Start-Sleep -Seconds 3
 Start-IfMissing 'BlazeServerH' (Join-Path $emu 'BlazeServerH.exe') $emu

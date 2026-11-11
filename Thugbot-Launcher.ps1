@@ -1,4 +1,4 @@
-# Thugbot Launcher: one window for the whole Hardline bot setup - orange and white, with police lights (the FloodBots
+﻿# Thugbot Launcher: one window for the whole Hardline bot setup - orange and white, with police lights (the FloodBots
 # Launcher made for Battlefield Hardline).
 #   - starts the backend: MySQL, the web server (Apache), the redirector and the Hardline emulator (BlazeServerH)
 #   - Servers 1 - 4 (BF-Portable's !StartServer.bat ... !StartServer4.bat): start / stop each, bots per server,
@@ -665,13 +665,13 @@ function Start-Svc([string]$key) {
     if (Svc-Running $key) { return $true }
     switch ($key) {
         'mysql' {
-            $exe = Join-Path $xampp 'mysql\bin\mysqld.exe'
-            if (-not (Test-Path $exe)) { Say "MySQL not found: $exe"; return $false }
-            Say 'Starting MySQL...'
-            # same as xampp\mysql_start.bat (from the xampp folder: the ini path is relative), without its console window
-            Start-Process -FilePath $exe -ArgumentList '--defaults-file=mysql\bin\my.ini', '--standalone' -WorkingDirectory $xampp -WindowStyle Hidden | Out-Null
-            for ($i = 0; $i -lt 30; $i++) { Wait-Ms 400; if (Port-Open 3306) { return $true }; if ($i -gt 4 -and -not (Svc-Running 'mysql')) { break } }
-            Say 'MySQL did not come up (see xampp\mysql\data\*.err, or Repair-MySQL-Privileges.bat).'; return $false
+            # Never start mysqld hidden: with no console its log lines get written into the privilege tables and corrupt them.
+            # Start-MySQL-Safe.ps1 checks/repairs the system tables, then starts it via xampp\mysql_start.bat in its own window.
+            Say 'Checking and starting MySQL...'
+            $p = Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + (Join-Path $PSScriptRoot 'Start-MySQL-Safe.ps1') + '"'), '-Portable', ('"' + $Portable + '"') -WindowStyle Hidden -PassThru
+            for ($i = 0; $i -lt 150; $i++) { Wait-Ms 400; if ($p.HasExited) { break } }
+            if (Port-Open 3306) { return $true }
+            Say 'MySQL did not come up (see xampp\mysql\data\mysql_error.log).'; return $false
         }
         'web' {
             $exe = Join-Path $xampp 'apache\bin\httpd.exe'
@@ -709,7 +709,10 @@ function Start-Backend {
 }
 function Stop-Backend {
     if (Get-ServerProcs) { Say 'Stop the Hardline servers first (they need the backend).'; return }
-    foreach ($k in 'emu', 'redir', 'web', 'mysql') { Get-Process $services[$k].Proc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue }
+    foreach ($k in 'emu', 'redir', 'web') { Get-Process $services[$k].Proc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue }
+    # MySQL gets a clean shutdown: killing it leaves its tables half-written
+    $adm = Join-Path $xampp 'mysql\bin\mysqladmin.exe'
+    if ((Svc-Running 'mysql') -and (Test-Path $adm)) { & $adm -u root shutdown 2>$null; for ($i = 0; $i -lt 40 -and (Svc-Running 'mysql'); $i++) { Wait-Ms 250 } }
     Wait-Ms 800; Update-Services; Say 'Backend stopped.'
 }
 function Update-Services {
