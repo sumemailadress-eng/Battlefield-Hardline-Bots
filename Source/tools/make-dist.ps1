@@ -12,7 +12,7 @@ if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
 New-Item -ItemType Directory -Force $dst, "$dst\out", "$dst\Data", "$dst\Source" | Out-Null
 
 foreach ($f in 'README.txt', 'PATCHNOTES.txt', 'Setup-Thugbot.bat', 'Setup-Thugbot.ps1', 'Thugbot-Paths.ps1', 'Start-Thugbot.bat', 'Start-Thugbot.ps1', 'Thugbot-Control.bat', 'Thugbot-Control.ps1', 'Thugbot-Keys.bat',
-               'Thugbot-Keys.ps1', 'Thugbot-Chat.ps1', 'Open-Thugbot-Map.bat', 'Open-Thugbot-3DMap.bat', 'Install-Thugbot.ps1', 'Uninstall-Thugbot.ps1', 'Thugbot-Launcher.bat', 'Thugbot-Launcher.ps1') {
+               'Thugbot-Keys.ps1', 'Thugbot-Chat.ps1', 'Open-Thugbot-Map.bat', 'Open-Thugbot-3DMap.bat', 'Start-MySQL-Safe.ps1', 'Rollback-Update.bat', 'VERSION.txt', 'Install-Thugbot.ps1', 'Uninstall-Thugbot.ps1', 'Thugbot-Launcher.bat', 'Thugbot-Launcher.ps1') {
     Copy-Item (Join-Path $root $f) $dst
 }
 Copy-Item "$root\out\xinput9_1_0.dll", "$root\out\ThugbotCore.dll" "$dst\out"

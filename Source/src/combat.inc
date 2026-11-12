@@ -106,7 +106,7 @@ static void settings_load(void)
     g_spawnSeatPctIni = GetPrivateProfileIntA("Thugbot", "SpawnInVehiclePercent", 0, path);
     GetPrivateProfileStringA("Thugbot", "MgDamageScale", "2", v, sizeof v, path); g_mgScale = fmaxf(0, fminf(10, (float)atof(v)));
     g_vehDmgHumansPct = GetPrivateProfileIntA("Thugbot", "VehicleDamageToHumans", 100, path); if (g_vehDmgHumansPct < 0) g_vehDmgHumansPct = 0; if (g_vehDmgHumansPct > 400) g_vehDmgHumansPct = 400;
-    H->log("settings: ThugBot 0.4.2, bot vehicle guns x%.2f, damage from bots' vehicles to people %d%%, aim learning %s (max skill %.2f), heli port %s, heli mode %d", g_mgScale, g_vehDmgHumansPct, g_aimLearn ? "on" : "off", g_aimLearnMax, THUGBOT_HELI_PORT ? "built in" : "off by default", g_heliMode);
+    H->log("settings: ThugBot 0.4.8, bot vehicle guns x%.2f, damage from bots' vehicles to people %d%%, aim learning %s (max skill %.2f), heli port %s, heli mode %d", g_mgScale, g_vehDmgHumansPct, g_aimLearn ? "on" : "off", g_aimLearnMax, THUGBOT_HELI_PORT ? "built in" : "off by default", g_heliMode);
     P = &kProfiles[g_set.difficulty];
     H->log("settings: %s - difficulty %s, aggression %d, defend share %.2f, combat %s, peek %s, vehicles %s, supplies %s", path, kProfileNames[g_set.difficulty],
            g_set.aggression, g_set.defendShare, g_set.combat ? "on" : "off (simple)", g_set.peek ? "on" : "off", g_set.vehicles ? "on" : "off", g_set.supplies ? "on" : "off");

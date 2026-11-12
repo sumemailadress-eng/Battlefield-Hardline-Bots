@@ -21,7 +21,29 @@ static const NavGrid *g_driveMaskGrid;
 static unsigned g_driveMaskSerial;
 static unsigned g_drives, g_driveArrivals, g_driveGiveUps;
 
-typedef struct Drive { int finalRun; ULONGLONG finalAt, finalChkAt; float finalPos[3]; ULONGLONG noMaskSince, navWaitAt; int checkedFront, yield; ULONGLONG startAt, lookAt, edgeAt; float freeC, freeL, freeR; void *veh; ULONGLONG progressAt, reverseUntil, stoppedSince, exitFrom, noRouteSince, traceAt; float progressPos[3], reverseTurn, roadGoal[3], planGoal[3]; int stuck; ULONGLONG turnAroundAt; float stuckYaw; int xfRejected;
+// (the tester 2026-11-12: "some fences and other objects can be driven through but not walls / garages") A wall for the driving code: hit at 0.5 m and at 2 m along the same line,
+// neither a body that breaks. Low or breakable things are driven through.
+static int hit_breakable(void)   // the last ray hit a body that breaks (fences, glass, small props) - driven through
+{
+    uintptr_t body = *(uintptr_t *)g_lastHit.rest, vt = body && !IsBadReadPtr((void *)body, 8) ? *(uintptr_t *)body - H->image : 0;
+    int br = vt == 0x2819d40 || survey_kind(vt) == 'b';
+    if (br) { static unsigned l; if (l++ < 40) H->log("drive-through: a car drives through class %#llx (breakable) at %.0f %.0f %.0f", (unsigned long long)vt, ((const float *)&g_lastHit.pos)[0], ((const float *)&g_lastHit.pos)[1], ((const float *)&g_lastHit.pos)[2]); }
+    return br;
+}
+static int solid_wall(const float *c0, float dx, float dz, float from, float to, float *dist)
+{
+    float h[3], best = 1e9f; int n = 0;
+    for (int k = 0; k < 2; k++) {
+        float y = c0[1] - 0.5f + k * 1.5f, a[3] = { c0[0] + dx * from, y, c0[2] + dz * from }, e[3] = { c0[0] + dx * to, y, c0[2] + dz * to };
+        if (!ray_cast(a, e, h, NULL)) return 0;
+        uintptr_t body = *(uintptr_t *)g_lastHit.rest, vt = body && !IsBadReadPtr((void *)body, 8) ? *(uintptr_t *)body - H->image : 0;
+        if (vt == 0x2819d40 || survey_kind(vt) == 'b') { static unsigned l; if (l++ < 40) H->log("drive-through: class %#llx at %.0f %.0f %.0f is breakable - not a wall", (unsigned long long)vt, h[0], h[1], h[2]); return 0; }
+        float dd = from + dist2d(a, h); if (dd < best) best = dd; n++;
+    }
+    if (dist) *dist = best;
+    return n == 2;
+}
+typedef struct Drive { float jEnd[3]; int junctionReplanned; ULONGLONG junctionLogAt; int trustLogged; ULONGLONG exitLogAt; int exitDone, exitOn; ULONGLONG exitAt; float exitPos[3]; int finalRun; ULONGLONG finalAt, finalChkAt; float finalPos[3]; ULONGLONG noMaskSince, navWaitAt; int checkedFront, yield; ULONGLONG startAt, lookAt, edgeAt; float freeC, freeL, freeR; void *veh; ULONGLONG progressAt, reverseUntil, stoppedSince, exitFrom, noRouteSince, traceAt; float progressPos[3], reverseTurn, roadGoal[3], planGoal[3]; int stuck; ULONGLONG turnAroundAt; float stuckYaw; int xfRejected;
                        float motionYawPos[3], stYaw, stTurn; int lastSign, xfKey, stN; ULONGLONG signAt, stAt; float lastFwd, motionPos[3], motionYaw, matrixOff, avoidTurn; ULONGLONG yieldSince; ULONGLONG motionPosAt, motionAt; int motionN; int onNet, onLine, queueing, turningAround; float netGoal[3], cross, queueGap, footAhead, speed, speedPos[3], prevErr; ULONGLONG speedAt, queueAt, queueSince, blockStillSince, passUntil, laneUntil; } Drive;
 static Drive g_drv[MAX_BOTS];
 // (On foot: the next time it sits in any vehicle is a new drive. Getting back into the same car kept exitFrom set: it got straight out again.)
@@ -635,14 +657,42 @@ static void vnet_graph_build(void)
     g_vgBuiltFor = g_vgSerial; g_vgN = 0; g_vgLinkN = 0;
     if (!g_vgP) { g_vgP = malloc(sizeof *g_vgP * VG_MAX); g_vgLinkStart = malloc(sizeof(int) * (VG_MAX + 1)); g_vgLinks = malloc(sizeof(int) * VG_MAX * 8); }
     if (!g_vgP || !g_vgLinkStart || !g_vgLinks) return;
-    static int routeOf[VG_MAX];
-    for (int k = 0; k < g_vnetN; k++) for (int q = 0; q < g_vnet[k].n && g_vgN < VG_MAX; q++) { memcpy(g_vgP[g_vgN], g_vnet[k].pts[q], 12); routeOf[g_vgN] = k; g_vgN++; }
+    static int routeOf[VG_MAX]; static unsigned char isEnd[VG_MAX];
+    for (int k = 0; k < g_vnetN; k++) for (int q = 0; q < g_vnet[k].n && g_vgN < VG_MAX; q++) { memcpy(g_vgP[g_vgN], g_vnet[k].pts[q], 12); routeOf[g_vgN] = k; isEnd[g_vgN] = q == 0 || q == g_vnet[k].n - 1; g_vgN++; }
     for (int a = 0; a < g_vgN; a++) {
         g_vgLinkStart[a] = g_vgLinkN; int cnt = 0;
         if (a > 0 && routeOf[a - 1] == routeOf[a]) { g_vgLinks[g_vgLinkN++] = a - 1; cnt++; }   // (along its route first)
         if (a + 1 < g_vgN && routeOf[a + 1] == routeOf[a]) { g_vgLinks[g_vgLinkN++] = a + 1; cnt++; }
         for (int b = 0; b < g_vgN && cnt < 8; b++)
             if (routeOf[a] != routeOf[b] && dist2d(g_vgP[a], g_vgP[b]) < 15 && fabsf(g_vgP[a][1] - g_vgP[b][1]) < 4) { g_vgLinks[g_vgLinkN++] = b; cnt++; }
+        // (0.4.8, the tester's T-junction drawing) a route that ends on the middle of another: its end links to the stretch it ends on, and that stretch's points to the end, even
+        // where the other route has no point within 15 m of it
+        for (int b = 0; b + 1 < g_vgN && cnt < 8; b++) {
+            if (routeOf[b] != routeOf[b + 1] || routeOf[b] == routeOf[a]) continue;
+            const float *s0 = g_vgP[b], *s1 = g_vgP[b + 1];
+            if (isEnd[a]) {   // this end against that stretch
+                float sx = s1[0] - s0[0], sz = s1[2] - s0[2], l2 = sx * sx + sz * sz, u = l2 > 0.01f ? ((g_vgP[a][0] - s0[0]) * sx + (g_vgP[a][2] - s0[2]) * sz) / l2 : 0;
+                u = u < 0 ? 0 : u > 1 ? 1 : u;
+                float px = s0[0] + sx * u - g_vgP[a][0], pz = s0[2] + sz * u - g_vgP[a][2];
+                if (px * px + pz * pz < 64 && fabsf(g_vgP[a][1] - s0[1]) < 4) {
+                    for (int e = 0; e < 2 && cnt < 8; e++) { int to = b + e, dup = 0; for (int l = g_vgLinkStart[a]; l < g_vgLinkN; l++) dup |= g_vgLinks[l] == to; if (!dup) { g_vgLinks[g_vgLinkN++] = to; cnt++; } }
+                }
+            }
+            if (b == a || b + 1 == a) continue;
+        }
+        if (cnt < 8) {   // this point's stretches against the other routes' ends
+            for (int e = 0; e < g_vgN && cnt < 8; e++) {
+                if (!isEnd[e] || routeOf[e] == routeOf[a]) continue;
+                for (int side = -1; side <= 0; side++) {
+                    int s = a + side; if (s < 0 || s + 1 >= g_vgN || routeOf[s] != routeOf[a] || routeOf[s + 1] != routeOf[a]) continue;
+                    const float *s0 = g_vgP[s], *s1 = g_vgP[s + 1];
+                    float sx = s1[0] - s0[0], sz = s1[2] - s0[2], l2 = sx * sx + sz * sz, u = l2 > 0.01f ? ((g_vgP[e][0] - s0[0]) * sx + (g_vgP[e][2] - s0[2]) * sz) / l2 : 0;
+                    u = u < 0 ? 0 : u > 1 ? 1 : u;
+                    float px = s0[0] + sx * u - g_vgP[e][0], pz = s0[2] + sz * u - g_vgP[e][2];
+                    if (px * px + pz * pz < 64 && fabsf(g_vgP[e][1] - s0[1]) < 4) { int dup = 0; for (int l = g_vgLinkStart[a]; l < g_vgLinkN; l++) dup |= g_vgLinks[l] == e; if (!dup) { g_vgLinks[g_vgLinkN++] = e; cnt++; } break; }
+                }
+            }
+        }
     }
     g_vgLinkStart[g_vgN] = g_vgLinkN;
     H->log("vnet: route network of %d point(s), %d link(s)", g_vgN, g_vgLinkN);
@@ -714,6 +764,10 @@ static int vnet_path(const float *vp, const float *target, float *path, int maxP
     // (the Fun-Bots roads imported for the Second Assault maps are road stretches, not flag-to-flag trips: any route that
     // passes within 60 m of the vehicle and 35 m of the flag counts, driven from the one point to the other)
     int bestK = -1, bestV = 0, bestT = 0; float bestCost = 1e9f;
+    {   // (0.4.8) on a route already (a point within 8 m): along the network, junctions included
+        int on = 0; for (int k = 0; k < g_vnetN && !on; k++) for (int q = 0; q < g_vnet[k].n; q++) if (dist2d(vp, g_vnet[k].pts[q]) < 8 && fabsf(vp[1] - g_vnet[k].pts[q][1]) < 4) { on = 1; break; }
+        if (on) { int gn = vnet_graph_path(vp, target, path, maxPts); if (gn >= 2) return gn; }
+    }
     for (int k = 0; k < g_vnetN; k++) {
         const VRoute *v = &g_vnet[k];
         int qv = -1, qt = -1; float dv = g_vnetLead ? 120.0f : 60.0f, dt = 35;   /* (60 m: drivers further off than that never found the tester's drawn routes - 2026-10-31) */
@@ -852,6 +906,47 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
         for (int o = 0; o < H->botCount; o++) if (o != i && !g_bot[o].inVehicle && g_bot[o].boardHeli == v && t - g_bot[o].boardHeliAt < 2000) coming++;
         if (coming) { d->progressAt = t; memcpy(d->progressPos, vp, 12); return 1; }
     }
+    // (the tester 2026-11-11, with a drawing: cars parked nose-out in single garages - walls left, right and behind - and the drivers turned at once for the first route point, which is
+    // off to one side (0.4.2: drives started on average 18 - 23 m off their route), and scraped the door frame.) Garage exit: at the start of a drive, walls close on both sides:
+    // straight out along the hull - forwards, or backwards if the way ahead is shut - no steering, until 12 m out, the sides open up, or 12 s. Then the route as before.
+    if (seat == 0 && !d->exitDone) {
+        if (!d->exitAt) { d->exitAt = t; memcpy(d->exitPos, vp, 12); }
+        float yw = drive_yaw(d, v, t), fx = sinf(yw), fz = cosf(yw), rx = fz, rz = -fx, h[3];
+        float c0[3] = { vp[0], vp[1] + 1.0f, vp[2] };
+        // (the rays start outside the car's own body: 1.3 m to the sides, 2.6 m ahead / behind)
+        float sl[3] = { c0[0] - rx * 1.3f, c0[1], c0[2] - rz * 1.3f }, sr[3] = { c0[0] + rx * 1.3f, c0[1], c0[2] + rz * 1.3f };
+        float cl[3] = { c0[0] - rx * 3.2f, c0[1], c0[2] - rz * 3.2f }, cr[3] = { c0[0] + rx * 3.2f, c0[1], c0[2] + rz * 3.2f };
+        float sa[3] = { c0[0] + fx * 2.6f, c0[1], c0[2] + fz * 2.6f }, sb[3] = { c0[0] - fx * 2.6f, c0[1], c0[2] - fz * 2.6f };
+        float ca[3] = { c0[0] + fx * 6.0f, c0[1], c0[2] + fz * 6.0f }, cb[3] = { c0[0] - fx * 6.0f, c0[1], c0[2] - fz * 6.0f };
+        float dl = 9, dr = 9;
+        int wl = solid_wall(c0, -rx, -rz, 1.3f, 3.2f, &dl), wr2 = solid_wall(c0, rx, rz, 1.3f, 3.2f, &dr);
+        (void)sl; (void)sr; (void)cl; (void)cr;
+        float out = dist2d(vp, d->exitPos);
+        int turnNear = 0;
+        if (b->npts && b->wp < b->npts) {   // a bend of 50 degrees+ within 15 m along the route: the junction steering takes over now
+            float along = dist2d(vp, &b->path[b->wp * 3]), pa = atan2f(b->path[b->wp * 3] - vp[0], b->path[b->wp * 3 + 2] - vp[2]);
+            for (int q = b->wp + 1; q < b->npts && along < 15; q++) { const float *p0 = &b->path[(q - 1) * 3], *p1 = &b->path[q * 3]; float a1 = atan2f(p1[0] - p0[0], p1[2] - p0[2]); if (fabsf(wrap_pi(a1 - pa)) > 0.87f) { turnNear = 1; break; } pa = a1; along += dist2d(p0, p1); }
+        }
+        if (turnNear && out > 2) { d->exitDone = 1; static unsigned tn; if (tn++ < 60) H->log("garage exit: %s - a turn on its route within 15 m: hands over to the junction steering", (char *)b->player + OFF_PLAYER_NAME); }
+        else if (!(wl && wr2) || out > 12 || t - d->exitAt > 12000) {
+            if (d->exitOn) { static unsigned el; if (el++ < 60) H->log("garage exit: %s in the %s is out (%.0f m, %.1f s) - on to the route", (char *)b->player + OFF_PLAYER_NAME, vehicle_name(v), out, (t - d->exitAt) / 1000.0); }
+            if (!(wl && wr2) || out > 12 || t - d->exitAt > 12000) d->exitDone = 1;
+        } else {
+            int ahead = ray_cast(sa, ca, h, NULL) && dist2d(c0, h) < 4.0f, behind = ray_cast(sb, cb, h, NULL) && dist2d(c0, h) < 4.0f;
+            int back = ahead && !behind;
+            if (!d->exitOn) { d->exitOn = 1; static unsigned gl; if (gl++ < 60) H->log("garage exit: %s in the %s - walls on both sides, straight %s, no steering", (char *)b->player + OFF_PLAYER_NAME, vehicle_name(v), back ? "out backwards" : "out forwards"); }
+            // centred between the walls: aim 6 m ahead at the middle of the gap, gently (0.35 at most), never towards a wall closer than 1 m to the car's side (half width 1 m)
+            float shift = (dr - dl) * 0.5f, tp[3] = { c0[0] + fx * 6.0f + rx * shift, c0[1], c0[2] + fz * 6.0f + rz * shift };
+            float err = wrap_pi(atan2f(tp[0] - c0[0], tp[2] - c0[2]) - yw), steer = fmaxf(-0.35f, fminf(0.35f, -err * 1.5f));
+            if (steer > 0 && dr < 2.0f) steer = 0;   // (+ turns towards the right-hand ray)
+            if (steer < 0 && dl < 2.0f) steer = 0;
+            if (back) steer = 0;   // (backing out: straight)
+            b->fwd = back ? -0.6f : 0.6f; b->turn = steer;
+            if (t >= d->exitLogAt) { d->exitLogAt = t + 1500; static unsigned cl2; if (cl2++ < 120) H->log("garage exit: %s centring - wall left %.1f m, right %.1f m, steer %+.2f", (char *)b->player + OFF_PLAYER_NAME, dl, dr, steer); }
+            d->progressAt = t; memcpy(d->progressPos, vp, 12);
+            return 1;
+        }
+    }
     if (!d->finalRun && b->targetFlag >= 0 && toTarget < 150 && d->roadGoal[0] != 0 && dist2d(vp, d->roadGoal) < 8) { d->finalRun = 1; d->finalAt = t; d->finalChkAt = 0; }
     // The last stretch: the road or route gets no closer, the flag is under 150 m. Straight at it over open ground, not fast, until a wall, a drop or no headway
     // (then this is as close as it goes: everyone out), or 25 s
@@ -865,7 +960,7 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
         }
         float nose = veh_nose(vehicle_name(v));
         float o[3] = { vp[0] + sinf(yw) * nose, vp[1] + 0.8f, vp[2] + cosf(yw) * nose }, e[3] = { o[0] + sinf(yw) * 8, o[1], o[2] + cosf(yw) * 8 }, h[3], hn[3];
-        if (ray_cast(o, e, h, hn) && hn[1] < 0.8f && dist2d(o, h) < 4 && fabsf(err) < 0.6f) stop = "something solid ahead";
+        if (ray_cast(o, e, h, hn) && hn[1] < 0.8f && !hit_breakable() && dist2d(o, h) < 4 && fabsf(err) < 0.6f) stop = "something solid ahead";
         float a[3] = { vp[0] + sinf(yw) * 7, vp[1] + 6.9f, vp[2] + cosf(yw) * 7 }, g0[3] = { a[0], vp[1] - 4.2f, a[2] };
         if (!ray_cast(a, g0, h, NULL)) stop = "the ground drops away";
         if (stop) {
@@ -941,6 +1036,9 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
         if (toTarget <= rest + 5.0f) { d->finalRun = 1; d->finalAt = t; d->finalChkAt = 0; return 1; }   // (nothing left of the route gets nearer)
     }
     int strictNet = g_strictRoutes && d->onNet;
+    // (the tester 2026-11-12: "they should still use the routes I made - if I made a route it's 1000% safe") onNet means a route from <map>.vroutes - drawn by a person in game
+    // (!rec, !vsave) or in the 3D map, never learned or planned (learned roads are the road map). On one: no braking or backing off for walls / rocks ahead, no giving up.
+    if (strictNet && !d->trustLogged) { d->trustLogged = 1; static unsigned tl; if (tl++ < 200) H->log("route: %s on a hand-made route, trusting it", (char *)b->player + OFF_PLAYER_NAME); }
     if (strictNet && b->npts && b->wp < b->npts) {   // where the car is along the route (40 m at most: a loop in it is not skipped), and a point already beside or behind it is passed
         int nearK = b->wp; float nd = 1e9f, wAlong = 0;
         for (int k = b->wp; k < b->npts && k < b->wp + 40; k++) { if (k > b->wp) { wAlong += dist2d(&b->path[(k - 1) * 3], &b->path[k * 3]); if (wAlong > 40) break; } float dd = dist2d(vp, &b->path[k * 3]); if (dd < nd) { nd = dd; nearK = k; } }
@@ -960,6 +1058,22 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
     }
     if (d->cross < 10) d->onLine = 1;
     if (strictNet && d->onLine && d->cross > 20) { static unsigned cl; if (cl++ < 20) H->log("drive: %s is %.0f m off its route - picks one again", (char *)b->player + OFF_PLAYER_NAME, d->cross); b->npts = 0; b->planAt = t; d->onNet = 0; d->onLine = 0; return 1; }
+    if (b->npts && dist2d(&b->path[(b->npts - 1) * 3], d->jEnd) > 5) { memcpy(d->jEnd, &b->path[(b->npts - 1) * 3], 12); d->junctionReplanned = 0; }   // (a new route: its own early pick)
+    if (strictNet && b->npts && b->wp < b->npts && !d->junctionReplanned) {
+        float rem = 0; for (int k = b->wp; k + 1 < b->npts; k++) rem += dist2d(&b->path[k * 3], &b->path[(k + 1) * 3]);
+        const float *endp = &b->path[(b->npts - 1) * 3];
+        if (rem < 45 && dist2d(endp, b->target) > 40) {
+            d->junctionReplanned = 1; memcpy(d->jEnd, endp, 12); static unsigned jr; if (jr++ < 120) H->log("junction: %s - its route ends in %.0f m, %.0f m short of the flag: picks the next one now", (char *)b->player + OFF_PLAYER_NAME, rem, dist2d(endp, b->target));
+            b->npts = 0; b->planAt = 0; return 1;
+        }
+    }
+    if (strictNet && (!b->npts || b->wp >= b->npts) && dist2d(vp, b->target) > 40) {
+        static unsigned rl; if (rl++ < 120) H->log("junction: %s - its route ran out %.0f m from the flag: the next one, not straight on", (char *)b->player + OFF_PLAYER_NAME, dist2d(vp, b->target));
+        b->npts = 0; b->planAt = 0;
+        if (d->freeC < 4.0f + d->speed * d->speed / 12.0f) b->fwd = d->speed > 2.0f ? -1.0f : 0;   // (a wall within stopping distance: brake)
+        else b->fwd = 0;
+        return 1;
+    }
     const float *aim = b->npts && b->wp < b->npts ? &b->path[b->wp * 3] : b->target;
     float pursuit[3];
     if (strictNet && b->npts && b->wp < b->npts) {   // aim close ahead on the route, stopping short of a real bend, so corners are taken round, not cut
@@ -970,7 +1084,13 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
         for (int k = b->wp; k < b->npts; k++) {
             const float *q = &b->path[k * 3];
             float seg = dist2d(prev, q);
-            if (k > b->wp && fabsf(wrap_pi(atan2f(q[0] - prev[0], q[2] - prev[2]) - dir0)) > 0.61f) { memcpy(pursuit, prev, 12); break; }
+            if (k > b->wp && fabsf(wrap_pi(atan2f(q[0] - prev[0], q[2] - prev[2]) - dir0)) > 0.61f) {
+                // (0.4.7, junctions: "switch too late, can't turn naturally") within a few metres of the corner - more at speed - aim 5 m down the next leg: the turn starts early, on an arc
+                float dc = dist2d(vp, prev), seg2 = dist2d(prev, q);
+                if (dc < 8.0f + d->speed * 0.8f && seg2 > 0.5f) { float f = fminf(1.0f, fminf(8.0f, 4.0f + d->speed * 0.4f) / seg2); pursuit[0] = prev[0] + (q[0] - prev[0]) * f; pursuit[1] = q[1]; pursuit[2] = prev[2] + (q[2] - prev[2]) * f; }
+                else memcpy(pursuit, prev, 12);
+                break;
+            }
             if (seg >= left) { float f = left / seg; pursuit[0] = prev[0] + (q[0] - prev[0]) * f; pursuit[1] = q[1]; pursuit[2] = prev[2] + (q[2] - prev[2]) * f; break; }
             left -= seg; memcpy(pursuit, q, 12); prev = q;
         }
@@ -990,7 +1110,7 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
         d->stuckYaw = yawNow;
         if (moved < 2.0f) {
             d->stuck++;
-            if (d->stuck >= 8) {   // (4 tries of backing up and turning was quick to give a car up: 8)
+            if (d->stuck >= (strictNet ? 16 : 8)) {   // (4 tries of backing up and turning was quick to give a car up: 8; on a hand-made route twice that)
                 g_driveGiveUps++;
                 if (b->targetFlag >= 0) { g_crewCall[i].v = v; g_crewCall[i].at = t; g_crewCall[i].flag = b->targetFlag; crew_dismount(b, t, d, v, vp, b->targetFlag, toTarget, "stuck"); }
                 else vehicle_exit(b, t, d, "stuck");
@@ -1009,7 +1129,14 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
     // backing up after a hit
     // (on a route it backs up nearly straight and stops 6 m off the line; time spent backing up is not judged as stuck)
     if (t < d->reverseUntil && strictNet && !d->turningAround && d->cross > 6) d->reverseUntil = 0;
-    if (t < d->reverseUntil) { b->fwd = -1; b->turn = strictNet && !d->turningAround ? d->reverseTurn * 0.25f : d->reverseTurn; d->progressAt = t; memcpy(d->progressPos, vp, 12); return 1; }
+    int sideWalls = 0;
+    if (t < d->reverseUntil) {   // (0.4.5: walls close on both sides - back out straight; turning while reversing scraped the garage walls)
+        float yw = drive_yaw(d, v, t), rx = cosf(yw), rz = -sinf(yw), h[3], c0[3] = { vp[0], vp[1] + 1.0f, vp[2] };
+        float sl[3] = { c0[0] - rx * 1.3f, c0[1], c0[2] - rz * 1.3f }, sr[3] = { c0[0] + rx * 1.3f, c0[1], c0[2] + rz * 1.3f };
+        float cl[3] = { c0[0] - rx * 2.8f, c0[1], c0[2] - rz * 2.8f }, cr[3] = { c0[0] + rx * 2.8f, c0[1], c0[2] + rz * 2.8f };
+        sideWalls = solid_wall(c0, -rx, -rz, 1.3f, 2.8f, NULL) && solid_wall(c0, rx, rz, 1.3f, 2.8f, NULL); (void)sl; (void)sr; (void)cl; (void)cr; (void)h;
+    }
+    if (t < d->reverseUntil) { b->fwd = -1; b->turn = sideWalls ? 0 : strictNet && !d->turningAround ? d->reverseTurn * 0.25f : d->reverseTurn; d->progressAt = t; memcpy(d->progressPos, vp, 12); return 1; }
     d->turningAround = 0;
     if (d->queueing) { b->fwd = d->speed > 2.5f && (t / 250) % 2 ? -0.5f : 0; b->turn = 0; return 1; }   // waiting its turn
     // The way on is behind the car: a three-point turn (back up turning, then forwards) rather than circling forwards
@@ -1054,13 +1181,15 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
         const char *vn2 = vehicle_name(v);
         float vmax = strstr(vn2, "MOTORCYCLE") ? 20.0f : 16.0f;
         float bend = 0, along = dist2d(vp, &b->path[b->wp * 3]), prevA = atan2f(b->path[b->wp * 3] - vp[0], b->path[b->wp * 3 + 2] - vp[2]);
-        for (int q = b->wp + 1; q < b->npts && along < 30; q++) {
+        float look = fmaxf(30.0f, d->speed * 3.0f), bendAt = 0;
+        for (int q = b->wp + 1; q < b->npts && along < look; q++) {
             const float *p0 = &b->path[(q - 1) * 3], *p1 = &b->path[q * 3];
             float a1 = atan2f(p1[0] - p0[0], p1[2] - p0[2]), turnQ = fabsf(wrap_pi(a1 - prevA));
-            if (along > 6 && turnQ > bend) bend = turnQ;
+            if (along > 4 && turnQ > bend) { bend = turnQ; bendAt = along; }
             prevA = a1; along += dist2d(p0, p1);
         }
         float vwant = bend > 1.0f ? 6.0f : bend > 0.5f ? 10.0f : vmax;
+        if (bend > 1.0f && t >= d->junctionLogAt) { d->junctionLogAt = t + 4000; static unsigned jl; if (jl++ < 200) H->log("junction: %s - a %.0f degree turn %.0f m ahead at %.1f m/s, slowing to %.0f", (char *)b->player + OFF_PLAYER_NAME, bend * 57.3f, bendAt, d->speed, vwant); }
         if (fabsf(err) > 1.0f) vwant = fminf(vwant, 6.0f);
         if (strictNet && d->queueGap < 26) vwant = fminf(vwant, fmaxf(0.0f, (d->queueGap - 9) * 0.7f));
         if (strictNet && d->cross > 3) vwant = fminf(vwant, d->cross > 8 ? 7.0f : 11.0f);
@@ -1097,10 +1226,10 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
         for (int r = 0; r < 3; r++) {
             float a = yaw + (r - 1) * 0.35f, nose = veh_nose(vehicle_name(v)), o[3] = { vp[0] + sinf(yaw) * nose, vp[1] + 0.7f, vp[2] + cosf(yaw) * nose }, e[3] = { o[0] + sinf(a) * 14, o[1], o[2] + cosf(a) * 14 }, h[3], hn[3];
             // (the tester 2026-11-07: "afraid of going up slopes") a hit on ground that faces up (under 37 degrees) is the road rising, not a wall. (50 let a rounded rock read as road: "hit a rock")
-            free[r] = ray_cast(o, e, h, hn) && hn[1] < 0.8f ? dist2d(o, h) : 14;
+            free[r] = ray_cast(o, e, h, hn) && hn[1] < 0.8f && !hit_breakable() ? dist2d(o, h) : 14;   // (0.4.7: fences and other breakables are driven through)
             // and at roof height: garage beams and low ceilings a bumper ray passes under (the tester: "garages with beams")
             o[1] = e[1] = vp[1] + 1.7f;
-            if (ray_cast(o, e, h, hn) && hn[1] < 0.8f && dist2d(o, h) < free[r]) free[r] = dist2d(o, h);
+            if (ray_cast(o, e, h, hn) && hn[1] < 0.8f && !hit_breakable() && dist2d(o, h) < free[r]) free[r] = dist2d(o, h);
         }
         // Traffic: anyone ahead - a car (anyone's, driven or parked), a soldier on foot - within 14 m and 35 degrees of
         // the nose. Close (under 7 m): stop and wait (yield); further: steer to pass it on the side it isn't. Two bot
@@ -1133,8 +1262,11 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
         d->freeC = free[1]; d->freeL = free[0]; d->freeR = free[2];
     }
     if (strictNet && t >= d->passUntil) {   // on a route: the route, and stop rather than swerve
-        if (d->freeC < 4 && d->freeL < 5 && d->freeR < 5) { d->reverseUntil = t + 1500; d->reverseTurn = d->freeL > d->freeR ? 1.0f : -1.0f; d->freeC = 14; return 1; }
-        if (d->freeC < 5 && (t / 250) % 2) b->fwd = d->speed > 2.5f ? -0.5f : 0.0f;
+        // (0.4.7: on its hand-made line nothing static is in the way - the person who drew it drove it. Off the line by 4 m+ it still stops short of walls.)
+        if (d->cross >= 4) {
+            if (d->freeC < 4 && d->freeL < 5 && d->freeR < 5) { d->reverseUntil = t + 1500; d->reverseTurn = d->freeL > d->freeR ? 1.0f : -1.0f; d->freeC = 14; return 1; }
+            if (d->freeC < 5 && (t / 250) % 2) b->fwd = d->speed > 2.5f ? -0.5f : 0.0f;
+        }
     }
     else if (d->yield) { b->fwd = (t / 300) % 2 ? -0.3f : 0; b->turn = 0; }
     else if (d->avoidTurn != 0 && d->freeC >= 4) b->turn = fmaxf(-1, fminf(1, b->turn + d->avoidTurn * 1.5f));
@@ -1376,8 +1508,8 @@ static void vehicles_track(void)
         }
     }
     {   // right after a level load: soon and again, while the bots are still at HQ
-        static const unsigned kAt[2] = { 2000, 6000 };
-        if (g_vehLevelAt && g_vehLevelScans < 2 && now_ms() - g_vehLevelAt >= kAt[g_vehLevelScans] && !g_vehScanBusy) { vehicle_scan_start(1); g_vehLevelScans++; }
+        static const unsigned kAt[7] = { 2000, 6000, 12000, 20000, 30000, 45000, 60000 };
+        if (g_vehLevelAt && g_vehLevelScans < 7 && now_ms() - g_vehLevelAt >= kAt[g_vehLevelScans] && !g_vehScanBusy) { vehicle_scan_start(1); g_vehLevelScans++; }
     }
     vehicle_scan_start(0);
     for (int k = 0; k < g_knownVehN; k++) {   // where each one is now (gone - destroyed, freed - when it stops reading as one)
@@ -1417,6 +1549,7 @@ static int soldier_riding(const float *pos, const float *vel)
     }
     return -1;
 }
+static int vehicle_near(const float *p, float r) { for (int k = 0; k < g_knownVehN; k++) if (dist2d(p, g_knownVeh[k].pos) < r && fabsf(p[1] - g_knownVeh[k].pos[1]) < 4) return 1; return 0; }
 static int vehicle_known_has(void *v) { for (int k = 0; k < g_knownVehN; k++) if (g_knownVeh[k].v == v) return 1; return 0; }
 static int vehicle_known_stopped_human(int k) { return k >= 0 && k < g_knownVehN && g_knownVeh[k].humanDriverTeam && g_knownVeh[k].still; }
 static int vehicle_has_driver(int k)

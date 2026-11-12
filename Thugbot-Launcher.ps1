@@ -1,4 +1,4 @@
-﻿# Thugbot Launcher: one window for the whole Hardline bot setup - orange and white, with police lights (the FloodBots
+# Thugbot Launcher: one window for the whole Hardline bot setup - orange and white, with police lights (the FloodBots
 # Launcher made for Battlefield Hardline).
 #   - starts the backend: MySQL, the web server (Apache), the redirector and the Hardline emulator (BlazeServerH)
 #   - Servers 1 - 4 (BF-Portable's !StartServer.bat ... !StartServer4.bat): start / stop each, bots per server,
@@ -465,6 +465,15 @@ $xamlText = @'
               <Button x:Name="BtnBotsOn" Style="{StaticResource Btn}" Content="THUGBOT: ON" Width="128"/>
             </StackPanel>
 
+            <TextBlock Text="TICKETS (FROM NEXT SERVER START)" Style="{StaticResource H}"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,10" ToolTip="Tickets per team. Steps of 100 (right-click: 500). Written into the server's startup.txt when you start or restart it">
+              <Button x:Name="BtnTixDn" Style="{StaticResource Btn}" Content="-" Width="34" Padding="0,4"/>
+              <Border BorderBrush="#38322C" BorderThickness="1" Width="64" Height="32" Margin="0,0,8,8" Background="#0E0E10">
+                <TextBlock x:Name="TxtTix" Text="1000" FontFamily="Consolas" FontSize="18" Foreground="#FF6A00" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+              </Border>
+              <Button x:Name="BtnTixUp" Style="{StaticResource Btn}" Content="+" Width="34" Padding="0,4"/>
+            </StackPanel>
+
             <TextBlock Text="SERVER" Style="{StaticResource H}"/>
             <UniformGrid Columns="2">
               <Button x:Name="BtnStart" Style="{StaticResource OBtn}" Content="START SERVER"/>
@@ -489,6 +498,10 @@ $xamlText = @'
               <Button x:Name="BtnLearned" Style="{StaticResource Btn}" Content="LEARNED MAP" FontSize="12" Padding="4,5"/>
               <Button x:Name="Btn3D" Style="{StaticResource Btn}" Content="3D MAP" FontSize="12" Padding="4,5"/>
               <Button x:Name="BtnClassic" Style="{StaticResource Btn}" Content="OLD PANEL" FontSize="12" Padding="4,5"/>
+            </UniformGrid>
+            <UniformGrid Columns="2">
+              <Button x:Name="BtnCheckUpd" Style="{StaticResource Btn}" Content="CHECK FOR UPDATE" FontSize="12" Padding="4,5" ToolTip="Compare this copy with the newest release on GitHub"/>
+              <Button x:Name="BtnUpdate" Style="{StaticResource OBtn}" Content="UPDATE" FontSize="12" Padding="4,5" IsEnabled="False" ToolTip="Download and install the newest release. Your settings, learned routes and logs are kept; the old files are backed up"/>
             </UniformGrid>
             </StackPanel>
           </StackPanel>
@@ -604,8 +617,8 @@ try { $win = [Windows.Markup.XamlReader]::Parse($xamlText) } catch { Write-Host 
 function Find-Ctl([string]$name) { $win.FindName($name) }
 $ui = @{}
 foreach ($nm in 'GlowR', 'GlowB', 'LightR', 'LightW', 'LightB', 'TitleBox', 'TitleO', 'TitleB', 'TitleW', 'Slice1', 'Slice2', 'Sub', 'BtnBackStart', 'BtnBackStop', 'DotMysql', 'TxtMysql', 'DotWeb', 'TxtWeb', 'DotRedir', 'TxtRedir', 'DotEmu', 'TxtEmu',
-    'SelTitle', 'SelMap', 'SelImg', 'SelName', 'SelPorts', 'SelStatus', 'BtnBotsDn', 'BtnBotsUp', 'TxtBots', 'BtnBotsOn', 'BtnStart', 'BtnStop', 'BtnRestart', 'BtnRound', 'BtnNext', 'BtnVeh', 'BtnDiff', 'BtnAimLearn', 'BtnAimMax', 'BtnVehDmg',
-    'BtnLearned', 'Btn3D', 'BtnClassic', 'RotCount', 'RotTitle', 'LstRot', 'BtnPlay', 'BtnUp', 'BtnDown', 'BtnRemove', 'LstMaps', 'LstModes',
+    'SelTitle', 'SelMap', 'SelImg', 'SelName', 'SelPorts', 'SelStatus', 'BtnBotsDn', 'BtnBotsUp', 'TxtBots', 'BtnTixDn', 'BtnTixUp', 'TxtTix','BtnBotsOn', 'BtnStart', 'BtnStop', 'BtnRestart', 'BtnRound', 'BtnNext', 'BtnVeh', 'BtnDiff', 'BtnAimLearn', 'BtnAimMax', 'BtnVehDmg',
+    'BtnLearned', 'Btn3D', 'BtnClassic', 'BtnCheckUpd', 'BtnUpdate', 'RotCount', 'RotTitle', 'LstRot', 'BtnPlay', 'BtnUp', 'BtnDown', 'BtnRemove', 'LstMaps', 'LstModes',
     'BtnGitHub', 'BtnAdd', 'BtnAllMode', 'BtnFill', 'Log', 'TabServers', 'TabMaps', 'PageServers', 'PageMaps', 'BtnShow3D', 'LstReports', 'BtnMapReload', 'BtnMapBrowser', 'WebHost', 'WebMsg') { $ui[$nm] = Find-Ctl $nm }
 foreach ($n in 1..4) { foreach ($p in 'Card', 'CardImg', 'CardState', 'CardName', 'CardMap', 'CardPlayers', 'CardJoin') { $ui["$p$n"] = Find-Ctl "$p$n" } }
 
@@ -793,6 +806,7 @@ function Update-Selected {
         default { $ui.SelStatus.Text = 'OFFLINE'; $ui.SelStatus.Foreground = $cDim }
     }
     $ui.TxtBots.Text = $set["Bots$n"]
+    $ui.TxtTix.Text = "$(Get-Tickets $n)"
     $on = $set["BotsOn$n"] -eq '1'
     $ui.BtnBotsOn.Content = $(if ($on) { 'THUGBOT: ON' } else { 'THUGBOT: OFF' })
     $ui.BtnStart.IsEnabled = $s.State -eq 'off'
@@ -882,6 +896,22 @@ function Start-Helpers {
     }
 }
 
+# tickets per team: the server takes them as vars.gameModeCounter (a percentage of the mode's own count) from its
+# startup.txt. The old 70 was never applied (preset locked), so 1000 tickets = the mode's own count = 100%: counter = tickets / 10
+# (true for Conquest Large's 1000; other modes scale from their own count)
+function Get-Tickets([int]$n) { $t = 0; if (-not [int]::TryParse([string]$set["Tickets$n"], [ref]$t)) { $t = 1000 }; [Math]::Max(100, [Math]::Min(5000, $t)) }
+function Set-Tickets([int]$n) {
+    $t = Get-Tickets $n; $pct = [Math]::Max(1, [int][Math]::Round($t / 10))
+    $st = Join-Path (Split-Path $srv[$n].MapList) 'startup.txt'
+    if (-not (Test-Path $st)) { Say "Tickets: no $st, left as it is."; return }
+    # "vars.preset NORMAL true" locks the preset, and the server then ignored gameModeCounter (log 2026-11-11: counter 35
+    # executed, round still started on 1000): unlock it ("false"), same preset otherwise
+    $lines = @(Get-Content $st | Where-Object { $_ -notmatch '^\s*vars\.gameModeCounter\b' } |
+        ForEach-Object { $_ -replace '^(\s*vars\.preset\s+\S+)\s+true\s*$', '$1 false' }) + "vars.gameModeCounter $pct"
+    Set-Content $st $lines -Encoding ascii
+    Say "Server ${n}: $t tickets (vars.gameModeCounter $pct)."
+}
+
 function Start-Bf4([int]$n) {
     $s = $srv[$n]
     Refresh-Servers
@@ -890,6 +920,7 @@ function Start-Bf4([int]$n) {
     $botsOn = $set["BotsOn$n"] -eq '1'
     $bots = [int]$set["Bots$n"]
     if ($botsOn) { if (-not (Install-Bots)) { return } }
+    Set-Tickets $n
     if ($botsOn -and $bots -gt 0) { $bat = Get-BotBat $s $bots } else { $bat = $s.Stock }
     if (-not (Test-Path $bat)) { Say "Not found: $bat"; return }
     $rows = Read-Rows $s
@@ -1010,6 +1041,10 @@ $ui.BtnBotsDn.Add_Click({ Safe { $n = $script:sel; $v = [Math]::Max(0, [int]$set
 $ui.BtnBotsUp.Add_Click({ Safe { $n = $script:sel; $v = [Math]::Min(63, [int]$set["Bots$n"] + 1); $set["Bots$n"] = "$v"; Save-Settings; Update-Selected } })
 $ui.BtnBotsDn.Add_MouseRightButtonUp({ Safe { $n = $script:sel; $set["Bots$n"] = '0'; Save-Settings; Update-Selected } })
 $ui.BtnBotsUp.Add_MouseRightButtonUp({ Safe { $n = $script:sel; $set["Bots$n"] = '63'; Save-Settings; Update-Selected } })
+$ui.BtnTixDn.Add_Click({ Safe { $n = $script:sel; $set["Tickets$n"] = "$([Math]::Max(100, (Get-Tickets $n) - 100))"; Save-Settings; Update-Selected } })
+$ui.BtnTixUp.Add_Click({ Safe { $n = $script:sel; $set["Tickets$n"] = "$([Math]::Min(5000, (Get-Tickets $n) + 100))"; Save-Settings; Update-Selected } })
+$ui.BtnTixDn.Add_MouseRightButtonUp({ Safe { $n = $script:sel; $set["Tickets$n"] = "$([Math]::Max(100, (Get-Tickets $n) - 500))"; Save-Settings; Update-Selected } })
+$ui.BtnTixUp.Add_MouseRightButtonUp({ Safe { $n = $script:sel; $set["Tickets$n"] = "$([Math]::Min(5000, (Get-Tickets $n) + 500))"; Save-Settings; Update-Selected } })
 $ui.BtnBotsOn.Add_Click({ Safe { $n = $script:sel; $set["BotsOn$n"] = $(if ($set["BotsOn$n"] -eq '1') { '0' } else { '1' }); Save-Settings; Update-Selected; Say "Server ${n}: Thugbot $(if ($set["BotsOn$n"] -eq '1') { 'on' } else { 'off' }) from its next start." } })
 $ui.BtnStart.Add_Click({ Safe { Start-Bf4 $script:sel } })
 $ui.BtnStop.Add_Click({ Safe { Stop-Bf4 $script:sel } })
@@ -1041,6 +1076,92 @@ $ui.BtnVehDmg.Add_Click({ Safe {
 foreach ($n in 1..4) { $ui["CardJoin$n"].Add_Click({ param($sd, $ev) $ev.Handled = $true; $t = [int]$sd.Tag; Safe { Join-Bf4 $t } }) }   # (the card's own JOIN: the click stays on it, the card isn't selected by it)
 $ui.BtnLearned.Add_Click({ Safe { $p = Join-Path $reportDir 'latest.html'; if (Test-Path $p) { Show-Web (New-Object Uri $p).AbsoluteUri 'the learned map (latest)' } else { Say 'No learned map yet - it appears a minute after a round starts.' } } })
 $ui.Btn3D.Add_Click({ Safe { Show-3D } })
+
+# ---- updates from GitHub (CHECK FOR UPDATE / UPDATE). The newest release, pre-releases included, against this copy's version
+# (VERSION.txt, or the "ThugBot x.y.z" in out\ThugbotCore.dll). Never offers an older version. Updating keeps the user's own files.
+$script:updRepo = 'sumemailadress-eng/Battlefield-Hardline-Bots'
+$script:updLatest = $null
+function Ver-Parse([string]$s) {
+    $m = [regex]::Match("$s", '(\d+)\.(\d+)(?:\.(\d+))?')
+    if (-not $m.Success) { return $null }
+    $c = if ($m.Groups[3].Success) { [int]$m.Groups[3].Value } else { 0 }
+    return New-Object Version ([int]$m.Groups[1].Value), ([int]$m.Groups[2].Value), $c
+}
+function Get-LocalVersion {
+    $vf = Join-Path $PSScriptRoot 'VERSION.txt'
+    if (Test-Path $vf) { $v = Ver-Parse (Get-Content $vf -TotalCount 1); if ($v) { return $v } }
+    $dll = Join-Path $PSScriptRoot 'out\ThugbotCore.dll'
+    if (Test-Path $dll) { $m = Select-String -Path $dll -Pattern 'ThugBot (\d+\.\d+(\.\d+)?)' -Encoding ascii | Select-Object -First 1; if ($m) { return Ver-Parse $m.Matches[0].Groups[1].Value } }
+    return $null
+}
+function Get-LatestRelease {
+    # newest by publish date, pre-releases too; short timeout so the window doesn't hang
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/$($script:updRepo)/releases?per_page=20" -Headers @{ 'User-Agent' = 'Thugbot-Launcher' } -TimeoutSec 8 -ErrorAction Stop
+    $r = @($rel | Where-Object { -not $_.draft } | Sort-Object { [datetime]$_.published_at } -Descending) | Select-Object -First 1
+    if (-not $r) { return $null }
+    $zip = @($r.assets | Where-Object { $_.name -like '*.zip' }) | Select-Object -First 1
+    return [pscustomobject]@{ Tag = $r.tag_name; Version = Ver-Parse $r.tag_name; Url = $(if ($zip) { $zip.browser_download_url } else { $r.zipball_url }); Asset = $(if ($zip) { $zip.name } else { 'zipball' }); Page = $r.html_url }
+}
+function Check-Update([switch]$Quiet) {
+    $loc = Get-LocalVersion
+    try { $r = Get-LatestRelease } catch {
+        $msg = "$($_.Exception.Message)"
+        if (-not $Quiet) { Say $(if ($msg -match '403|rate limit') { 'Update check: GitHub says too many requests - try again in an hour.' } else { "Update check failed (offline?): $msg" }) }
+        return $null
+    }
+    $script:updLatest = $r
+    if (-not $r -or -not $r.Version) { if (-not $Quiet) { Say 'Update check: no release found on GitHub.' }; return $null }
+    if ($loc -and $r.Version -le $loc) { if (-not $Quiet) { Say "Up to date ($loc; newest on GitHub: $($r.Tag))." }; $ui.BtnUpdate.IsEnabled = $false; return $false }
+    Say "Update available: $(if ($loc) { $loc } else { 'unknown' }) -> $($r.Version) ($($r.Tag)). Press UPDATE."
+    $ui.BtnUpdate.IsEnabled = $true; $ui.BtnUpdate.Content = "UPDATE TO $($r.Tag)"
+    return $true
+}
+# Files of the user's that an update never replaces: settings, paths, logs, shortcuts, backups. Learned data (Data\) and map images only arrive when missing.
+function Update-Keep([string]$rel) {
+    $n = Split-Path $rel -Leaf
+    if ($n -in 'Thugbot.ini', 'Thugbot-Paths.ini', 'Thugbot-Launcher.ini', 'VERSION.txt.user') { return 'keep' }
+    if ($n -match '\.(log|lnk)$' -or $n -match '\.bak' -or $rel -match '^(update_backup|lnk_backup|src_backup|backup)') { return 'keep' }
+    if ($rel -match '^Data\\' -or $rel -match '^tools\\Map3D\\.*\.(png|jpg|jpeg|webp)$') { return 'missing' }
+    return 'copy'
+}
+function Apply-Update([string]$from, [string]$to, [string]$backup, [switch]$DryRun) {
+    $copied = 0; $kept = 0; $added = 0
+    foreach ($f in Get-ChildItem $from -Recurse -File) {
+        $rel = $f.FullName.Substring($from.Length).TrimStart('\')
+        $dst = Join-Path $to $rel; $mode = Update-Keep $rel
+        if ($mode -eq 'keep' -and (Test-Path $dst)) { $kept++; continue }
+        if ($mode -eq 'missing' -and (Test-Path $dst)) { $kept++; continue }
+        $existed = Test-Path $dst
+        if (-not $DryRun) {
+            if ($existed) { $b = Join-Path $backup $rel; New-Item -ItemType Directory -Force (Split-Path $b) | Out-Null; Copy-Item $dst $b -Force }
+            New-Item -ItemType Directory -Force (Split-Path $dst) | Out-Null; Copy-Item $f.FullName $dst -Force
+        }
+        if ($existed) { $copied++ } else { $added++ }
+    }
+    return [pscustomobject]@{ Replaced = $copied; Added = $added; Kept = $kept }
+}
+function Do-Update {
+    if (Get-ServerProcs) { Say 'Stop the Hardline servers first, then UPDATE.'; return }
+    $r = $script:updLatest; if (-not $r) { if (-not (Check-Update)) { return }; $r = $script:updLatest }
+    $loc = Get-LocalVersion
+    if ($loc -and $r.Version -le $loc) { Say "Nothing to update: this copy ($loc) is not older than $($r.Tag)."; return }
+    $tmp = Join-Path $env:TEMP ("thugbot_update_" + (Get-Date -Format yyyyMMdd_HHmmss)); New-Item -ItemType Directory -Force $tmp | Out-Null
+    $zip = Join-Path $tmp 'release.zip'
+    Say "Downloading $($r.Tag) ($($r.Asset))..."
+    Invoke-WebRequest -Uri $r.Url -OutFile $zip -Headers @{ 'User-Agent' = 'Thugbot-Launcher' } -TimeoutSec 300 -UseBasicParsing -ErrorAction Stop
+    Expand-Archive $zip (Join-Path $tmp 'x') -Force
+    $root = Join-Path $tmp 'x'; $sub = @(Get-ChildItem $root -Directory); if ($sub.Count -eq 1 -and -not (Get-ChildItem $root -File)) { $root = $sub[0].FullName }
+    if (-not (Test-Path (Join-Path $root 'out\ThugbotCore.dll'))) { Say 'The download does not look like a ThugBot release (no out\ThugbotCore.dll) - nothing changed.'; return }
+    $backup = Join-Path $PSScriptRoot ("update_backup_" + (Get-Date -Format yyyyMMdd_HHmmss))
+    $res = Apply-Update $root $PSScriptRoot $backup
+    Set-Content (Join-Path $PSScriptRoot 'VERSION.txt') "$($r.Version)" -Encoding ascii
+    Say "Updated to $($r.Tag): $($res.Replaced) files replaced, $($res.Added) added, $($res.Kept) of yours kept. Old files: $backup (Rollback-Update.bat puts them back). Close and reopen the launcher; the next server start installs it."
+    if (Test-Path (Join-Path $PSScriptRoot 'build.bat')) { Say 'Note: this copy has build.bat - its own source (src\) is what the next start builds. The update does not change src\.' }
+    $ui.BtnUpdate.IsEnabled = $false
+}
+$ui.BtnCheckUpd.Add_Click({ Safe { Say 'Checking GitHub for a newer release...'; [void](Check-Update) } })
+$ui.BtnUpdate.Add_Click({ Safe { Do-Update } })
 $ui.BtnGitHub.Add_Click({ Safe { Start-Process 'https://github.com/sumemailadress-eng/Battlefield-Hardline-Bots' } })
 $ui.BtnClassic.Add_Click({ Safe { $p = Join-Path $PSScriptRoot 'Thugbot-Control.bat'; if (Test-Path $p) { Start-Process -FilePath $p -WorkingDirectory $PSScriptRoot } } })
 

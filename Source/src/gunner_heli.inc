@@ -28,7 +28,7 @@ static int air_line_ok(const float *a, const float *q)
 #define GUN_CANDS 512   // (48 filled up on the vehicle's own parts on 109 of 111 seats: the search never reached the objects it points to)
 typedef struct Gunner {
     void *veh; int seat, phase; ULONGLONG at, fireSince, flipAt; unsigned hits0;
-    void *pl; int nc, po[GUN_CANDS], po2[GUN_CANDS], off[GUN_CANDS]; unsigned char root[GUN_CANDS]; void *wobj[GUN_CANDS]; float yaw0[GUN_CANDS], fy0[GUN_CANDS], body0, d1[GUN_CANDS], prevY[GUN_CANDS], prevF[GUN_CANDS]; unsigned char dead[GUN_CANDS]; int pitchDone;
+    ULONGLONG retestAt; int retests; void *pl; int nc, po[GUN_CANDS], po2[GUN_CANDS], off[GUN_CANDS]; unsigned char root[GUN_CANDS]; void *wobj[GUN_CANDS]; float yaw0[GUN_CANDS], fy0[GUN_CANDS], body0, d1[GUN_CANDS], prevY[GUN_CANDS], prevF[GUN_CANDS]; unsigned char dead[GUN_CANDS]; int pitchDone;
     int yawM, pitchM; float yawSign, pitchSign; int flip;
     float estYaw; ULONGLONG estAt; int estOk;   // blind aiming (no gun matrix found): the gun's heading kept by dead reckoning
     ULONGLONG scanAt; int scanFound, scanAir; float scanAim[3];   // (lag fix 0.3.1; a helicopter being aimed at: looked at more often)
@@ -167,7 +167,7 @@ static unsigned g_gunNoTarget, g_gunAiming, g_gunFiring, g_gunPresses;
 // the cone or 0.5 s after losing the target. Bursts of 3 - 6 s with 0.5 s between them. Load shedding doesn't release it: a skipped frame keeps the bot's buttons.
 static int gun_burst(Gunner *g, int i, ULONGLONG t)
 {
-    if (t >= g->burstEnd && t >= g->pauseEnd) { g->burstEnd = t + 3000 + ((unsigned)(i * 7 + t / 100) % 31) * 100; g->pauseEnd = g->burstEnd + 500; }
+    if (t >= g->burstEnd && t >= g->pauseEnd) { g->burstEnd = t + 2000 + ((unsigned)(i * 7 + t / 100) % 11) * 100; g->pauseEnd = g->burstEnd + 400; }
     int down = t < g->burstEnd;
     if (down && !g->pressed) g_gunPresses++;
     g->pressed = down;
@@ -297,7 +297,7 @@ static int gunner_think(int i, Bot *b, void *v, int seat, int team)
     }
     if (g->phase == 1) {   // turning (0.4 s: about 1 rad, so the sign reads right; 1.2 s turned door guns 1.5 - 3 rad and the sign came out backwards)
         b->turn = 1; b->buttons |= BTN_FIRE;
-        if (t - g->at < 400) return 1;
+        if (t - g->at < 250) return 1;
         float body = wrap_pi(gun_body_yaw(v) - g->body0);
         for (int c = 0; c < g->nc; c++) {
             const float *m = gun_mc(g, v, c);
@@ -311,8 +311,8 @@ static int gunner_think(int i, Bot *b, void *v, int seat, int team)
     }
     if (g->phase == 5) {   // and back
         b->turn = -1; b->buttons |= BTN_FIRE;
-        if (t - g->at < 400) return 1;
-        float body = wrap_pi(gun_body_yaw(v) - g->body0), best = 0.15f, bestW = 0.04f, mostW = 0; int nd = 0, nW = 0, yawW = -1; float signW = 1;
+        if (t - g->at < 250) return 1;
+        float body = wrap_pi(gun_body_yaw(v) - g->body0), best = 0.15f, bestW = 0.025f, mostW = 0; int nd = 0, nW = 0, yawW = -1; float signW = 1;
         for (int c = 0; c < g->nc; c++) {
             const float *m = gun_mc(g, v, c);
             nd += g->dead[c];
@@ -321,7 +321,7 @@ static int gunner_think(int i, Bot *b, void *v, int seat, int team)
             if (g->root[c] == 2) {   // (the tester's hits 2026-11-07: the game's weapon object's matrix at +0x50 pointed within 0.01 - 0.03 rad of all 28 of them: it IS the gun. It needn't turn far.)
                 nW++; if (fabsf(g->d1[c]) > mostW) mostW = fabsf(g->d1[c]);
                 float back = wrap_pi(d - g->d1[c]);   // (how it moved on -1)
-                if (fabsf(g->d1[c]) > bestW && back * g->d1[c] < 0 && fabsf(back) > 0.5f * fabsf(g->d1[c])) { bestW = fabsf(g->d1[c]); yawW = c; signW = g->d1[c] > 0 ? 1.0f : -1.0f; }
+                if (fabsf(g->d1[c]) > bestW && back * g->d1[c] < 0 && fabsf(back) > 0.3f * fabsf(g->d1[c])) { bestW = fabsf(g->d1[c]); yawW = c; signW = g->d1[c] > 0 ? 1.0f : -1.0f; }   // (0.4.4: back a third of the way is enough)
                 continue;
             }
             if (!gun_local(m)) d = wrap_pi(d - body);
@@ -370,6 +370,10 @@ static int gunner_think(int i, Bot *b, void *v, int seat, int team)
         if (!g->pitchBlind && g->pitchSign < 0 && g->root[g->pitchM] != 2) { g->flip = 1; g->pitchSign = 1; }
         // No flips on "no hits" (the tester 2026-11-07: "point erratically upwards, or back or front")
         g->rowFlips = 2; g->pChkFlips = 1;
+    }
+    if (g->yawM < 0 && g->pitchDone && g->retests < 3) {   // (0.4.4) no gun found: the test again in 20 s, three times (it used to guess for as long as the bot sat there)
+        if (!g->retestAt) g->retestAt = t + 20000;
+        else if (t >= g->retestAt) { int r = g->retests + 1; void *pl0 = g->pl; memset(g, 0, sizeof *g); g->veh = v; g->seat = seat; g->yawM = g->pitchM = -1; g->at = t; g->retests = r; g->pl = pl0; return 1; }
     }
     if (g->yawM < 0) {
         // (the tester 2026-10-29: "mounted guns on choppers don't seem to be used" - most seats never found their gun's matrix
@@ -449,6 +453,7 @@ static int gunner_think(int i, Bot *b, void *v, int seat, int team)
         if (ev) { const float *p = veh_pos(ev); if (!p) continue; memcpy(q, p, 12); q[1] += 1.0f; const char *en = vehicle_name(ev); if (strstr(en, "tank")) heavy = 120; else if (name_is_air(en)) heavy = -20; }   /* (aircraft first) */
         else { void *s = bot_soldier(pl); if (!s) continue; memcpy(q, soldier_pos(s), 12); q[1] += 1.1f; }
         float d = sqrtf((q[0] - eye[0]) * (q[0] - eye[0]) + (q[1] - eye[1]) * (q[1] - eye[1]) + (q[2] - eye[2]) * (q[2] - eye[2]));
+        if (g->yawM >= 0 && g->root[g->yawM] == 2) { const float *wm = gun_mc(g, v, g->yawM); if (wm) heavy += 40.0f * fabsf(wrap_pi(atan2f(q[0] - eye[0], q[2] - eye[2]) - atan2f(wm[8], wm[10]))); }   // (0.4.4: the one nearest its aim first)
         if (d + heavy >= best || d < 3) continue;   /* (the tester 2026-10-29: "target infantry and light vehicles") armour / aircraft count 120 m further */
         if (pl == g->banPl && t < g->banUntil) continue;
         if (alArc && !arcRetry) { float wp = atan2f(q[1] - eye[1], fmaxf(1, dist2d(q, eye))); if (arc_blocked(alArc, atan2f(q[0] - eye[0], q[2] - eye[2]) - bodyY) || wp < alArc->pLo - 0.1f || wp > alArc->pHi + 0.1f) continue; }
@@ -473,6 +478,7 @@ static int gunner_think(int i, Bot *b, void *v, int seat, int team)
             if (ev2) veh_lead(ev2, aim, dl, shot);
             { float self[3] = { 0, 0, 0 }; veh_lead(v, self, dl, shot); aim[0] -= self[0]; aim[1] -= self[1]; aim[2] -= self[2]; }
             aim[1] += alUp;
+            { float tf = dl / fmaxf(300.0f, shot); aim[1] += 0.5f * 9.8f * tf * tf; }   // (drop over the flight)
         }
     }
     float want = atan2f(aim[0] - eye[0], aim[2] - eye[2]), have = atan2f(fx, fz), err = wrap_pi(want - have + alYaw);
@@ -487,8 +493,8 @@ static int gunner_think(int i, Bot *b, void *v, int seat, int team)
     if (g->yawM >= 0 && g->root[g->yawM] == 2) {   // (0.3.19) the game's weapon: its direction is exact, so the sign is checked against it all the time
         if (fabsf(err) < 0.15f || fabsf(err) > 3.0f && 0) g->ysAt = 0;
         if (!g->ysAt) { g->ysAt = t; g->ysErr = fabsf(err); }
-        else if (t - g->ysAt > 500) {
-            if (fabsf(err) > g->ysErr + 0.05f && fabsf(err) > 0.3f && g->ysFlips < 2) { g->yawSign = -g->yawSign; g->ysFlips++; H->log("gunner: %s seat %d - its gun turned away from the target (%.2f -> %.2f rad): turn sign now %+.0f", vehicle_name(v), seat, g->ysErr, fabsf(err), g->yawSign); }
+        else if (t - g->ysAt > 800) {
+            if (fabsf(err) > g->ysErr + 0.2f && fabsf(err) > 0.5f && fabsf(b->turn) >= 0.8f && g->ysFlips < 1) { g->yawSign = -g->yawSign; g->ysFlips++; H->log("gunner: %s seat %d - its gun turned away from the target (%.2f -> %.2f rad): turn sign now %+.0f", vehicle_name(v), seat, g->ysErr, fabsf(err), g->yawSign); }
             g->ysAt = t; g->ysErr = fabsf(err);
         }
     }
@@ -510,8 +516,8 @@ static int gunner_think(int i, Bot *b, void *v, int seat, int team)
             if (fabsf(perr) < 0.004f) b->pitch = 0;
             if (fabsf(perr) < 0.1f) { if (!g->psAt) { g->psAt = t; g->psErr = fabsf(perr); } }
             if (!g->psAt) { g->psAt = t; g->psErr = fabsf(perr); }
-            else if (t - g->psAt > 500) {
-                if (fabsf(perr) > g->psErr + 0.05f && fabsf(perr) > 0.2f && g->psFlips < 2) { g->pitchSign = -g->pitchSign; g->psFlips++; H->log("gunner: %s seat %d - its gun's elevation went away from the target (%.2f -> %.2f rad): pitch sign now %+.0f", vehicle_name(v), seat, g->psErr, fabsf(perr), g->pitchSign); }
+            else if (t - g->psAt > 800) {
+                if (fabsf(perr) > g->psErr + 0.15f && fabsf(perr) > 0.3f && fabsf(b->pitch) >= 0.8f && g->psFlips < 1) { g->pitchSign = -g->pitchSign; g->psFlips++; H->log("gunner: %s seat %d - its gun's elevation went away from the target (%.2f -> %.2f rad): pitch sign now %+.0f", vehicle_name(v), seat, g->psErr, fabsf(perr), g->pitchSign); }
                 g->psAt = t; g->psErr = fabsf(perr);
             }
         } else {
@@ -525,7 +531,7 @@ static int gunner_think(int i, Bot *b, void *v, int seat, int team)
                 g->pChkAt = t; g->pChkErr = fabsf(perr);
             }
         }
-        float dd = fmaxf(1, dist2d(aim, eye)), cone = fmaxf(0.12f, fminf(0.42f, atanf(30.0f / dd))), tolP = g->pitchBlind ? 0.5f : cone;   // (30 m at the target, 7 to 24 degrees)
+        float dd = fmaxf(1, dist2d(aim, eye)), cone = fmaxf(0.05f, fminf(0.3f, atanf(10.0f / dd))), tolP = g->pitchBlind ? 0.5f : cone;   // (30 m at the target, 7 to 24 degrees)
         g_gunAiming++;
         // Near the target by its own transform: 14 m off, 4.6 to 11 degrees (8 m stopped them firing: 1 - 2% of frames) (0.22 rad was 44 m off at 200 m). No firing on yaw alone.
         float tolY = cone;

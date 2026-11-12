@@ -125,9 +125,7 @@ TROUBLESHOOTING
 ---------------
 - "A Hardline server is already running": close it (or use Stop in the control window) and start again.
 - No bots: check Thugbot_25200.log in the server folder. "core loaded" means the mod is running.
-- MySQL won't start: Start MySQL now checks its system tables first, restores any broken one from XAMPP's clean
-  copy (originals saved in xampp\mysql\mysql-autofix-backup-*) and starts it in its own window. MySQL is never
-  started hidden any more: that is what wrote its log into the tables and corrupted them. See xampp\mysql\data\mysql_error.log.
+- MySQL won't start: run BF-Portable's Repair-MySQL-Privileges.bat, then Start MySQL again.
 - Bots stuck somewhere on a new map: give it a round; they learn the spot, and routes you walk
   there are used first. "routes rebuild" re-makes the saved routes of the current map.
 - Server feels slow with 60 bots: use fewer bots per team.

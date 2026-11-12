@@ -1,4 +1,4 @@
-﻿# Thugbot Control: a small window to run the Hardline bot server. Start / stop it with a number of bots per team, pick a
+# Thugbot Control: a small window to run the Hardline bot server. Start / stop it with a number of bots per team, pick a
 # map and mode and switch to it now, edit the map rotation, restart or end the round, and open the learned map.
 # Talks to the server over RCON (the port and password from !StartServer-Bots.bat). Run Thugbot-Control.bat.
 # Also starts the backend (MySQL, the web server with the server-list API, the Hardline Blaze emulator) and finds the

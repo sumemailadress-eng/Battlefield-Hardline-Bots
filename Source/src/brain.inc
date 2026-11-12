@@ -44,7 +44,8 @@ typedef struct Bot {
     ULONGLONG takingAt;             // pressing E at a car it is taking
     void *crewVeh; int crewFlag, crewGo; ULONGLONG crewAt; float crewPos[3];   // the vehicle it left to walk to a flag: only ever compared, never read
     void *noVeh; ULONGLONG noVehUntil;   // a car it couldn't get into (4 s of E): left alone for a minute
-    void *roofVeh; ULONGLONG roofAt, roofSince; float roofPos[3];   // a helicopter above it (on a roof) it is walking to
+    void *roofVeh; ULONGLONG roofAt, roofSince; float roofPos[3];
+    void *takeVeh;   // the vehicle takingAt belongs to (0.4.3: the 12 s ran on across vehicles)   // a helicopter above it (on a roof) it is walking to
     ULONGLONG seatedSince, seatedStillSince;   // standing still inside a known car (a passenger seat); the car stopped too
     ULONGLONG slowSince, slideUntil; float slideStrafe; int slides;   // scraping along a wall
     float flank[3]; int flankFlag; ULONGLONG flankUntil;   // flanking point on the way to flankFlag
@@ -131,6 +132,7 @@ static int soldier_seated(const float *pos);
 static int soldier_riding(const float *pos, const float *vel);
 static int vehicle_known_has(void *v);
 static const float *vehicle_xf(void *v);   // drive.inc
+static int vehicle_near(const float *p, float r);   // drive.inc
 static int pax_think(int i, Bot *b, void *soldier, void *v, int team);
 static void human_gun_hit(void *giver, const float *victim, const char *what);   // gunner_heli.inc
 static int vehicle_has_driver(int k);
@@ -1223,7 +1225,7 @@ static void bot_think(int i)
     // towards the target (not one tried in the last few goes) for 2.5 s, sprinting - vaulting, E-ing doors and knifing
     // glass in the way - then plan again from there. Three goes that get nowhere (8 m): another flag for a while.
     if (!b->progAt || dist2d(pos, b->progPos) > 3 || g_fight[i].state != CS_IDLE || b->enemy) { b->progAt = t; memcpy(b->progPos, pos, 12); }
-    else if (t - b->progAt > 12000 && !b->exploreUntil && !(b->targetFlag >= 0 && dist2d(pos, b->target) < 12) &&
+    else if (t - b->progAt > 12000 && !b->exploreUntil && !(b->takingAt && t - b->takingAt < 15000) && !(b->targetFlag >= 0 && dist2d(pos, b->target) < 12) &&
              !(g_camp[i].flag >= 0 && g_camp[i].arrived) && dist2d(pos, b->target) > 4) {
         float best = -1e9f, want = atan2f(b->target[0] - pos[0], b->target[2] - pos[2]);
         {   // what is in the way: the next route point, and what a chest-height ray towards it hits (class, distance)
@@ -1243,7 +1245,7 @@ static void bot_think(int i)
                     uintptr_t body = *(uintptr_t *)g_lastHit.rest, vt = body && !IsBadReadPtr((void *)body, 8) ? *(uintptr_t *)body - H->image : 0;
                     int person = 0;
                     for (int j = 0; j < g_playerCount && !person; j++) { void *s2 = bot_soldier(g_players[j]); if (s2 && s2 != soldier && dist2d(soldier_pos(s2), h) < 1.0f) person = 1; }
-                    if (vt != 0x2808310 && vt != 0x2819780 && !person && !low_wall_at(h)) { fence_cut_at(h, "a bot stuck 12 s at it"); breach_learn(h, 'n'); }
+                    if (vt != 0x2808310 && vt != 0x2819780 && !person && !low_wall_at(h) && !vehicle_near(h, 5.0f)) { fence_cut_at(h, "a bot stuck 12 s at it"); breach_learn(h, 'n'); }   // (0.4.3: not a parked car)
                 }
             }
         }
@@ -1342,7 +1344,9 @@ static void bot_think(int i)
         if (k >= 0) {
             int vair = name_is_air(vname);
             if (dist2d(pos, vp) < 6.0f && fabsf(pos[1] - vp[1]) < 3.5f) {   // (and on its level: a roof helicopter is overhead from the floors below)
-                if (!b->takingAt) { b->takingAt = t; vehicle_taken_note(); static unsigned logged; if (logged++ < 400) H->log("drive: %s takes the %s at %.0f %.0f", (char *)player + OFF_PLAYER_NAME, vname, vp[0], vp[2]); }
+                if (b->takingAt && b->takeVeh != vehicle_known_ptr(k)) b->takingAt = 0;   // (another vehicle: its own 12 s, nearest door first)
+                b->progAt = t; b->exploreUntil = 0;   // (working at the doors is progress: the stuck rule left it alone)
+                if (!b->takingAt) { b->takingAt = t; b->takeVeh = vehicle_known_ptr(k); vehicle_taken_note(); static unsigned logged; if ((logged++ & 3) == 0 || logged < 400) H->log("drive: %s takes the %s at %.0f %.0f", (char *)player + OFF_PLAYER_NAME, vname, vp[0], vp[2]); }
                 float ep[3]; memcpy(ep, vp, 12);
                 void *vv = vehicle_known_ptr(k); const float *m = vv ? vehicle_xf(vv) : NULL;
                 if (m) {
