@@ -1245,7 +1245,14 @@ static void bot_think(int i)
                     uintptr_t body = *(uintptr_t *)g_lastHit.rest, vt = body && !IsBadReadPtr((void *)body, 8) ? *(uintptr_t *)body - H->image : 0;
                     int person = 0;
                     for (int j = 0; j < g_playerCount && !person; j++) { void *s2 = bot_soldier(g_players[j]); if (s2 && s2 != soldier && dist2d(soldier_pos(s2), h) < 1.0f) person = 1; }
-                    if (vt != 0x2808310 && vt != 0x2819780 && !person && !low_wall_at(h) && !vehicle_near(h, 5.0f)) { fence_cut_at(h, "a bot stuck 12 s at it"); breach_learn(h, 'n'); }   // (0.4.3: not a parked car)
+                    if (vt != 0x2808310 && vt != 0x2819780 && !person && !low_wall_at(h) && !vehicle_near(h, 5.0f)) { fence_cut_at(h, "a bot stuck 12 s at it"); breach_learn(h, 'n');   // (0.4.3: not a parked car)
+                        // (0.4.9, from FloodBots) and the routes that led it here: saved ones through the spot cut, learned ones set aside 10 min, the grid link that way
+                        // closed, a new plan
+                        float hf[3] = { h[0], pos[1], h[2] }; routes_cut_near(hf); int lrs = lr_block_near(hf);
+                        if (g_nav && !g_navBuilding) nav_block_towards(g_nav, pos[0], pos[1], pos[2], w[0], w[2]);
+                        b->npts = 0; b->planAt = 0;
+                        static unsigned sl; if (sl++ < 60) H->log("explore: %s stuck at a wall on its route at %.0f %.0f %.0f - %d learned route(s) set aside, re-planning", (char *)player + OFF_PLAYER_NAME, h[0], h[1], h[2], lrs);
+                    }
                 }
             }
         }

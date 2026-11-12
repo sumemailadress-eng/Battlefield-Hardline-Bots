@@ -23,6 +23,22 @@ static unsigned g_farLegs;   // grid-then-route joins onto a leg (not reaching t
 static int lr_users(int r);   // (brain.inc: bots walking learned route r)
 static float lr_spread(int r) { return 1.0f + 0.6f * (float)(((g_lrSeed * 2654435761u) ^ ((unsigned)r * 2246822519u)) % 1000) / 1000.0f; }
 
+// (FloodBots port 2026-11-12) Learned routes through a spot bots keep getting stuck at are left alone for 10 minutes (FloodBots, the tester 2026-10-27,
+// Siege: "the routes led team 2 into a barrier again and again").
+static ULONGLONG g_lrBlockUntil[BL_MAX_ROUTES];
+static int lr_blocked(int r) { return r >= 0 && r < BL_MAX_ROUTES && g_lrBlockUntil[r] && now_ms() < g_lrBlockUntil[r]; }
+static int lr_block_near(const float *p)
+{
+    int n = 0;
+    if (!g_learn) return 0;
+    for (int r = 0; r < g_learn->nRoutes && r < BL_MAX_ROUTES; r++) {
+        BLRoute *rt = &g_learn->routes[r];
+        for (int k = 0; k < rt->n; k++)
+            if (dist2d(rt->pts[k], p) < 4 && fabsf(rt->pts[k][1] - p[1]) < 3) { g_lrBlockUntil[r] = now_ms() + 600000; n++; break; }
+    }
+    return n;
+}
+
 static int is_bot_player(void *pl) { for (int i = 0; i < H->botCount; i++) if (H->bots[i] == pl) return 1; return 0; }
 
 static void trail_finish(Trail *tr, const char *why)
@@ -114,7 +130,7 @@ static int human_route_pick(const float *pos, const float *target, float *path, 
     int best = -1, bestK = 0, bestDir = 1;
     for (int r = 0; r < g_learn->nRoutes; r++) {
         BLRoute *rt = &g_learn->routes[r];
-        if (rt->kind != BL_FOOT || rt->n < 2) continue;
+        if (rt->kind != BL_FOOT || rt->n < 2 || lr_blocked(r)) continue;
         int k = -1; float kd = 8;
         for (int m = 0; m < rt->n; m++) { float d = dist2d(pos, rt->pts[m]); if (d < kd && fabsf(rt->pts[m][1] - pos[1]) < 3) { kd = d; k = m; } }
         if (k < 0) continue;
@@ -148,7 +164,7 @@ static int human_route_to_flag(const float *pos, const float *target, float *pat
     float bestScore = 1e9f; int best = -1, bestK = 0, bestDir = 1, bestStop = 0;
     for (int r = 0; r < g_learn->nRoutes; r++) {
         BLRoute *rt = &g_learn->routes[r];
-        if (rt->kind != BL_FOOT || rt->n < 2) continue;
+        if (rt->kind != BL_FOOT || rt->n < 2 || lr_blocked(r)) continue;
         for (int dir = -1; dir <= 1; dir += 2) {
             int stop = -1; float sd = 15;   // the point nearest the flag
             for (int m = 0; m < rt->n; m++) { float d = dist2d(rt->pts[m], target); if (d < sd && fabsf(rt->pts[m][1] - target[1]) < 4) { sd = d; stop = m; } }
@@ -190,7 +206,7 @@ static int human_route_far(const float *pos, const float *target, float *join, f
     float myD = dist2d(pos, target), bestScore = 1e9f; int best = -1, bestK = 0, bestDir = 1, bestStop = 0, bestReach = 0;
     for (int r = 0; r < g_learn->nRoutes; r++) {
         BLRoute *rt = &g_learn->routes[r];
-        if (rt->kind != BL_FOOT || rt->n < 2) continue;
+        if (rt->kind != BL_FOOT || rt->n < 2 || lr_blocked(r)) continue;
         int n = rt->n;
         for (int m = 0; m < n; m++) {
             cum[m] = m ? cum[m - 1] + dist2d(rt->pts[m - 1], rt->pts[m]) : 0;
@@ -237,7 +253,7 @@ static int human_route_leg(const float *pos, const float *target, float *path, i
     int best = -1, bestK = 0, bestDir = 1, bestStop = 0;
     for (int r = 0; r < g_learn->nRoutes; r++) {
         BLRoute *rt = &g_learn->routes[r];
-        if (rt->kind != BL_FOOT || rt->n < 2) continue;
+        if (rt->kind != BL_FOOT || rt->n < 2 || lr_blocked(r)) continue;
         int k = -1; float kd = 15;
         for (int m = 0; m < rt->n; m++) { float d = dist2d(pos, rt->pts[m]); if (d < kd && fabsf(rt->pts[m][1] - pos[1]) < 2.5f) { kd = d; k = m; } }
         if (k < 0) continue;

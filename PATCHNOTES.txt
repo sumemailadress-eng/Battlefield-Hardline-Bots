@@ -1,6 +1,12 @@
 ThugBot patch notes
 ===================
 
+V0.4.9 (not released yet)
+-------------------------
+- On foot: a bot stuck for 12 s against a solid wall on its route now drops the routes that led it there: saved
+  routes through that spot are cut, learned routes through it are left alone for 10 minutes, and it plans again.
+  Doors, low walls, people and parked cars don't count. (From FloodBots.)
+
 V0.4.8 (2026-11-12)
 -------------------
 Vehicles are still NOT officially supported and bots stay on foot by default (Vehicles=0). Not all of this has been
