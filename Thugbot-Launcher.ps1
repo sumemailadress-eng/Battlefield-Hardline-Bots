@@ -24,7 +24,7 @@ $launcherDir = if ($cfg.Launcher) { Split-Path $cfg.Launcher } else { Join-Path 
 
 # ---------------------------------------------------------------- launcher settings (bots per server etc.)
 $setPath = Join-Path $PSScriptRoot 'Thugbot-Launcher.ini'
-$set = @{ Selected = '1'; Persona = ''; Bots1 = '63'; Bots2 = '63'; Bots3 = '63'; Bots4 = '63'; BotsOn1 = '1'; BotsOn2 = '1'; BotsOn3 = '1'; BotsOn4 = '1' }
+$set = @{ Selected = '1'; Persona = ''; ProfileUser = ''; ProfilePass = ''; Bots1 = '63'; Bots2 = '63'; Bots3 = '63'; Bots4 = '63'; BotsOn1 = '1'; BotsOn2 = '1'; BotsOn3 = '1'; BotsOn4 = '1' }
 if (Test-Path $setPath) { foreach ($l in Get-Content $setPath) { if ($l -match '^\s*([A-Za-z0-9]+)\s*=\s*(.*?)\s*$') { $set[$Matches[1]] = $Matches[2] } } }
 function Save-Settings {
     $lines = @('; Thugbot Launcher settings (the launcher writes this)')
@@ -492,6 +492,17 @@ $xamlText = @'
               <Button x:Name="BtnVehDmg" Style="{StaticResource Btn}" Content="VEHICLE DMG: 100%" ToolTip="Damage bots in vehicles (their guns, running you over) do to human players: 0, 25, 50, 100, 200, 300 or 400%"/>
             </UniformGrid>
 
+            <TextBlock Text="PROFILE" Style="{StaticResource H}" Margin="0,10,0,6"/>
+            <Grid Margin="0,0,0,4">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+              <TextBlock Text="USER" FontFamily="Consolas" FontSize="11" Foreground="#8A8A8A" Margin="0,0,0,2"/>
+              <TextBlock Grid.Column="1" Text="PASSWORD" FontFamily="Consolas" FontSize="11" Foreground="#8A8A8A" Margin="6,0,0,2"/>
+              <TextBox x:Name="TxtProfUser" Grid.Row="1" Height="30" FontFamily="Consolas" FontSize="14" Background="#0B0B0B" Foreground="#F2F2F2" CaretBrush="#FF3B3B" BorderBrush="#3A3A3A" Padding="4,4"/>
+              <PasswordBox x:Name="TxtProfPass" Grid.Row="1" Grid.Column="1" Height="30" FontSize="14" Background="#0B0B0B" Foreground="#F2F2F2" CaretBrush="#FF3B3B" BorderBrush="#3A3A3A" Padding="4,4" Margin="6,0,0,0"/>
+              <Button x:Name="BtnProfSave" Grid.Row="1" Grid.Column="2" Style="{StaticResource Btn}" Content="LOG IN" Width="80" Padding="0,4" Margin="6,0,0,0"/>
+            </Grid>
+            <TextBlock x:Name="TxtProfState" FontFamily="Consolas" FontSize="11" Foreground="#8A8A8A" TextWrapping="Wrap" Margin="0,0,0,10"/>
 
             <TextBlock Text="TOOLS" Style="{StaticResource H}"/>
             <UniformGrid Columns="3">
@@ -618,7 +629,7 @@ function Find-Ctl([string]$name) { $win.FindName($name) }
 $ui = @{}
 foreach ($nm in 'GlowR', 'GlowB', 'LightR', 'LightW', 'LightB', 'TitleBox', 'TitleO', 'TitleB', 'TitleW', 'Slice1', 'Slice2', 'Sub', 'BtnBackStart', 'BtnBackStop', 'DotMysql', 'TxtMysql', 'DotWeb', 'TxtWeb', 'DotRedir', 'TxtRedir', 'DotEmu', 'TxtEmu',
     'SelTitle', 'SelMap', 'SelImg', 'SelName', 'SelPorts', 'SelStatus', 'BtnBotsDn', 'BtnBotsUp', 'TxtBots', 'BtnTixDn', 'BtnTixUp', 'TxtTix','BtnBotsOn', 'BtnStart', 'BtnStop', 'BtnRestart', 'BtnRound', 'BtnNext', 'BtnVeh', 'BtnDiff', 'BtnAimLearn', 'BtnAimMax', 'BtnVehDmg',
-    'BtnLearned', 'Btn3D', 'BtnClassic', 'BtnCheckUpd', 'BtnUpdate', 'RotCount', 'RotTitle', 'LstRot', 'BtnPlay', 'BtnUp', 'BtnDown', 'BtnRemove', 'LstMaps', 'LstModes',
+    'TxtProfUser', 'TxtProfPass', 'BtnProfSave', 'TxtProfState', 'BtnLearned', 'Btn3D', 'BtnClassic', 'BtnCheckUpd', 'BtnUpdate', 'RotCount', 'RotTitle', 'LstRot', 'BtnPlay', 'BtnUp', 'BtnDown', 'BtnRemove', 'LstMaps', 'LstModes',
     'BtnGitHub', 'BtnAdd', 'BtnAllMode', 'BtnFill', 'Log', 'TabServers', 'TabMaps', 'PageServers', 'PageMaps', 'BtnShow3D', 'LstReports', 'BtnMapReload', 'BtnMapBrowser', 'WebHost', 'WebMsg') { $ui[$nm] = Find-Ctl $nm }
 foreach ($n in 1..4) { foreach ($p in 'Card', 'CardImg', 'CardState', 'CardName', 'CardMap', 'CardPlayers', 'CardJoin') { $ui["$p$n"] = Find-Ctl "$p$n" } }
 
@@ -974,7 +985,52 @@ function Get-GameId($s) {
     } catch {}
     return 0
 }
+# ---------------------------------------------------------------- profile (user + password)
+# Logs in through BF-Portable's own login API (htdocs\api\login_api.php, the same one the BF Launcher uses) and joins
+# with that account's AuthCode and persona, so a join never picks up another profile's login. The password stays on
+# this PC only: it is kept in Thugbot-Launcher.ini encrypted with Windows DPAPI (only this Windows user can read it).
+function Protect-Pass([string]$p) { if (-not $p) { return '' }; ConvertFrom-SecureString (ConvertTo-SecureString $p -AsPlainText -Force) }
+function Unprotect-Pass([string]$e) {
+    if (-not $e) { return '' }
+    try { $ss = ConvertTo-SecureString $e; $b = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($ss); try { [Runtime.InteropServices.Marshal]::PtrToStringBSTR($b) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($b) } } catch { '' }
+}
+function Invoke-ProfileLogin([string]$u, [string]$p) {
+    try { $r = Invoke-RestMethod -Uri 'http://127.0.0.1/api/login_api.php' -Method Post -Body @{ username = $u; password = $p } -TimeoutSec 6 }
+    catch { return @('', '', 'the web server did not answer (start the backend first)') }
+    if ($r.status -eq 'success' -and $r.AuthCode) { return @(([string]$r.AuthCode).Trim(), [string][int]$r.user_id, '') }
+    return @('', '', $(if ($r.message) { $r.message } else { 'login failed' }))
+}
+function Show-Profile {
+    $ui.TxtProfUser.Text = $set.ProfileUser
+    $ui.TxtProfState.Text = if ($set.ProfileUser) { "JOIN logs in as $($set.ProfileUser)" + $(if ($set.Persona) { " (persona $($set.Persona))" } else { '' }) } else { 'No profile set: JOIN uses the last web/BF Launcher login.' }
+}
+function Save-Profile {
+    $u = $ui.TxtProfUser.Text.Trim(); $p = $ui.TxtProfPass.Password
+    if (-not $u) { $set.ProfileUser = ''; $set.ProfilePass = ''; $set.Persona = ''; Save-Settings; Show-Profile; Say 'Profile cleared.'; return }
+    if (-not $p -and $u -eq $set.ProfileUser) { $p = Unprotect-Pass $set.ProfilePass }
+    if (-not $p) { Say 'Type the password for that profile.'; return }
+    $r = Invoke-ProfileLogin $u $p
+    if (-not $r[0]) { Say "Profile login failed for ${u}: $($r[2])"; return }
+    $set.ProfileUser = $u; $set.ProfilePass = Protect-Pass $p; $set.Persona = $r[1]; Save-Settings
+    $ui.TxtProfPass.Password = ''; Show-Profile; Say "Profile saved: $u (persona $($r[1]))."
+}
+# BF-Portable's lanbfh needs BF-Portable's dinput8.dll hook in the game folder; other mods replace it.
+function Test-ClientHook {
+    if (-not $clientDir) { return }
+    $want = Join-Path $Portable 'Client-Files\BFH\dinput8.dll'; $have = Join-Path $clientDir 'dinput8.dll'
+    if (-not (Test-Path $want)) { return }
+    if (-not (Test-Path $have) -or (Get-FileHash $have).Hash -ne (Get-FileHash $want).Hash) {
+        Say "Warning: $have is not BF-Portable's hook (another mod replaced it?), so the game may never reach Blaze. Copy $want over it."
+    }
+}
+
 function Get-Login {
+    if ($set.ProfileUser) {
+        $r = Invoke-ProfileLogin $set.ProfileUser (Unprotect-Pass $set.ProfilePass)
+        if ($r[0]) { if ($set.Persona -ne $r[1]) { $set.Persona = $r[1]; Save-Settings }; return , @($r[0], $r[1]) }
+        Say "Profile login failed for $($set.ProfileUser): $($r[2]). Fix it under PROFILE (or clear the user name to use the last web login)."
+        return , @('', '', 'quiet')
+    }
     # what the last working join used (the game's own log), else the BF Launcher's saved auth code
     $auth = ''; $persona = $set.Persona
     $glog = if ($clientDir) { Join-Path $clientDir 'bf_global.log' } else { '' }
@@ -994,6 +1050,8 @@ function Join-Bf4([int]$n) {
     $gid = Get-GameId $s
     if (-not $gid) { Say "Server $n is not in the server list yet (give it a few seconds after it loads, then JOIN again)."; return }
     $lg = Get-Login
+    if ($lg.Count -gt 2) { return }
+    Test-ClientHook
     if (-not $lg[0] -or -not $lg[1]) { Say 'No login found: join once from the web server browser (that saves it), then JOIN works from here.'; return }
     $blaze = '127.0.0.1'
     $line = " -blazeIp $blaze -Render.DebugRendererEnable false -Core.IgnoreAlways true -Core.EnableJuice false -DisplayAsserts false -WaterInteract.Enable 0 -super layout.toc -dataPlatform Win32 -webMode MP -Origin_NoAppFocus -AuthCode $($lg[0]) -requestState State_ClaimReservation -requestStateParams `"<data levelmode=\`"mp\`" personaref=\`"$($lg[1])\`" isspectator=\`"false\`" role=\`"soldier\`" gameid=\`"$gid\`" putinsquad=\`"true\`"></data>`"|$blaze|"
@@ -1046,6 +1104,9 @@ $ui.BtnTixUp.Add_Click({ Safe { $n = $script:sel; $set["Tickets$n"] = "$([Math]:
 $ui.BtnTixDn.Add_MouseRightButtonUp({ Safe { $n = $script:sel; $set["Tickets$n"] = "$([Math]::Max(100, (Get-Tickets $n) - 500))"; Save-Settings; Update-Selected } })
 $ui.BtnTixUp.Add_MouseRightButtonUp({ Safe { $n = $script:sel; $set["Tickets$n"] = "$([Math]::Min(5000, (Get-Tickets $n) + 500))"; Save-Settings; Update-Selected } })
 $ui.BtnBotsOn.Add_Click({ Safe { $n = $script:sel; $set["BotsOn$n"] = $(if ($set["BotsOn$n"] -eq '1') { '0' } else { '1' }); Save-Settings; Update-Selected; Say "Server ${n}: Thugbot $(if ($set["BotsOn$n"] -eq '1') { 'on' } else { 'off' }) from its next start." } })
+$ui.BtnProfSave.Add_Click({ Safe { Save-Profile } })
+$ui.TxtProfPass.Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Return') { Safe { Save-Profile } } })
+Show-Profile
 $ui.BtnStart.Add_Click({ Safe { Start-Bf4 $script:sel } })
 $ui.BtnStop.Add_Click({ Safe { Stop-Bf4 $script:sel } })
 $ui.BtnRestart.Add_Click({ Safe { $n = $script:sel; Stop-Bf4 $n; Wait-Ms 2000; Start-Bf4 $n } })

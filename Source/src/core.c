@@ -528,6 +528,76 @@ static void perf_dump(void)
     g_jitterTurn = g_jitterStrafe = g_jitterTurnFight = g_jitterSteer = 0;
     g_perfSum = g_perfMax = 0; g_perfFrames = g_perfRays = g_perfRaysMax = 0; memset(g_perfPart, 0, sizeof g_perfPart);
 }
+// (FloodBots port 2026-11-12, the tester: "make sure ThugBot doesn't have this issue" - none of ThugBot's 155 logged level loads had it; this is a guard.)
+// (FloodBots, the tester 2026-11-12: "Dawnbreaker / Hammerhead - no vehicles were used, I drew routes!") The sequencer's level name is sometimes another map's:
+// at 16:50 the server ran Dawnbreaker (MP_Tremors - its flags) while the key said XP4_SubBase, so Hammerhead's grid, routes and learned data
+// were used - and saved back - on Dawnbreaker (XP4_SubBase.v8.routes holds Tremors' flags, MP_Damage holds Hammerhead's ...). Check: once
+// the flags are in, every saved routes file names its flags ("flag@x,z"); the map whose flags fit these best (all found, fewest extra) is
+// the level. A different one than the key: the key is corrected and the level data reloaded, without saving the wrong map's data.
+static int lv_score(const char *file, float fl[][2], int n, int *extraOut)
+{
+    FILE *f = fopen(file, "rb"); if (!f) return -1;
+    static float seen[64][2]; int sn = 0; char buf[8192]; size_t got;
+    char carry[32] = ""; size_t cl = 0;
+    while ((got = fread(buf, 1, sizeof buf - 1, f)) > 0) {
+        buf[got] = 0;
+        for (char *q = buf; (q = strstr(q, "flag@")); q += 5) {
+            float x, z; if (sscanf(q + 5, "%f,%f", &x, &z) != 2) continue;
+            int dup = 0; for (int k = 0; k < sn; k++) if (fabsf(seen[k][0] - x) < 3 && fabsf(seen[k][1] - z) < 3) dup = 1;
+            if (!dup && sn < 64) { seen[sn][0] = x; seen[sn][1] = z; sn++; }
+        }
+    }
+    (void)carry; (void)cl;
+    fclose(f);
+    int match = 0;
+    for (int i = 0; i < n; i++) for (int k = 0; k < sn; k++) if (fabsf(seen[k][0] - fl[i][0]) < 8 && fabsf(seen[k][1] - fl[i][1]) < 8) { match++; break; }
+    *extraOut = sn - match;
+    return match;
+}
+static void level_verify(void)
+{
+    static char doneFor[96]; static ULONGLONG firstAt; static int lastCount; static void *lastWorld;
+    void *w = *(void **)(H->image + RVA_GAME_WORLD);
+    if (w != lastWorld) { lastWorld = w; doneFor[0] = 0; firstAt = 0; }   // (a new level, even if the key reads the same)
+    if (!g_levelKey[0] || !strcmp(doneFor, g_levelKey)) return;
+    if (g_cpCount < 2) { firstAt = 0; return; }
+    ULONGLONG t = GetTickCount64();
+    if (!firstAt || g_cpCount != lastCount) { firstAt = t; lastCount = g_cpCount; return; }
+    if (t - firstAt < 3000) return;   // (all flags seen and placed)
+    float fl[MAX_CPS][2]; int n = 0;
+    for (int i = 0; i < g_cpCount && n < MAX_CPS; i++) {
+        if (FIELD(g_cps[i], 0x11c, int) && FIELD(g_cps[i], OFF_CP_RADIUS, float) <= 0) continue;
+        const float *q = (const float *)((char *)g_cps[i] + OFF_CP_POSITION); if (!q[0] && !q[2]) continue;
+        fl[n][0] = q[0]; fl[n][1] = q[2]; n++;
+    }
+    strcpy(doneFor, g_levelKey);
+    if (n < 2) return;
+    const char *us = strrchr(g_levelKey, '_');   // ..._ConquestLarge0: the mode
+    char lvl[96]; snprintf(lvl, sizeof lvl, "%.*s", us ? (int)(us - g_levelKey) : (int)strlen(g_levelKey), g_levelKey);
+    // the level part may hold '_' itself (XP4_SubBase): the mode is the last part
+    char cur[160]; snprintf(cur, sizeof cur, "Thugbot_routes\\%s.v8.routes", lvl);
+    int curExtra = 0, curScore = lv_score(cur, fl, n, &curExtra);
+    WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA("Thugbot_routes\\*.v8.routes", &fd);
+    char best[96] = ""; int bestScore = -1, bestExtra = 1 << 30;
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            { int us2 = 0; for (const char *c = fd.cFileName; *c && *c != '.'; c++) us2 += *c == '_'; if (us2 != 1) continue; }   // (base map files only, not per-mode ones)
+            char path[200]; snprintf(path, sizeof path, "Thugbot_routes\\%s", fd.cFileName);
+            int extra = 0, sc = lv_score(path, fl, n, &extra);
+            if (sc > bestScore || (sc == bestScore && extra < bestExtra)) { bestScore = sc; bestExtra = extra; snprintf(best, sizeof best, "%.*s", (int)(strlen(fd.cFileName) - strlen(".v8.routes")), fd.cFileName); }
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    H->log("level check: %d flag(s); %s fits %d (+%d other), best %s %d (+%d other)", n, lvl, curScore, curExtra, best[0] ? best : "-", bestScore, bestExtra);
+    // a better fit: all flags found there and the key's file doesn't find them all (or finds them only among many others)
+    if (best[0] && strcmp(best, lvl) && bestScore >= 3 && (bestScore >= curScore + 2 || (bestScore == curScore && curExtra > bestExtra + 2))) {
+        char key[96]; snprintf(key, sizeof key, "%s%s", best, us ? us : "");
+        H->log("level check: the flags are %s's, not %s's - level data reloaded as %s (nothing saved for %s)", best, lvl, key, g_levelKey);
+        if (g_learn) { bl_free(g_learn); free(g_learn); g_learn = NULL; }   // (the wrong map's learned data: not saved)
+        brain_level_reset();
+        strcpy(g_levelKey, key); strcpy(doneFor, key);
+    }
+}
 static void h_ppmUpdate(void *mgr, int a2, float dt)
 {
     o_ppmUpdate(mgr, a2, dt);
@@ -541,6 +611,7 @@ static void h_ppmUpdate(void *mgr, int a2, float dt)
         brain_level_reset();
     }
     if (!world) return;
+    level_verify();
     g_mgr = mgr;
     H->frame++;
     int n = 0;

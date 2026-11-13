@@ -1,6 +1,12 @@
 ThugBot patch notes
 ===================
 
+V0.4.10 (not play-tested yet)
+-----------------------------
+- Map check: a few seconds into a map the flags are compared with every map's saved flags; if the game ever reports the
+  wrong map name, the right map's data is used (seen on BF4 / FloodBots, not on Hardline so far).
+- Less lag: the grid is built in smaller slices (4 ms a frame) and gunners read their gun without a slow system call.
+
 V0.4.9 (not released yet)
 -------------------------
 - On foot: a bot stuck for 12 s against a solid wall on its route now drops the routes that led it there: saved

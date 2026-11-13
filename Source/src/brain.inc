@@ -342,7 +342,7 @@ static void nav_tick(void)
     if (!g_nav) { nav_start(); return; }
     if (g_navBuilding) {
         int phase = g_nav->phase;
-        if (nav_build_step(g_nav, ray_cast, 12000, 7.0)) {   // (the server sleeps ~75% of each frame: building 2-3x faster cost nothing visible)
+        if (nav_build_step(g_nav, ray_cast, 4000, 4.0)) {   // (4000 rays / 4 ms a frame, was 12000 / 7: FloodBots measured 30 ms slices - hitches while a grid builds, the tester 2026-11-12)
             g_navBuilding = 0;
             char path[160], learn[160];
             brain_paths(path, sizeof path, learn, sizeof learn);

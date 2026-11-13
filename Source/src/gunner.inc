@@ -19,7 +19,7 @@ static unsigned g_hitsBy[MAX_BOTS];   // soldier hits each bot made (core.c's da
 static const float *gun_m(void *v, int po, int off)
 {
     char *o = po < 0 ? (char *)v : FIELD(v, po, char *);
-    return o && !((uintptr_t)o & 7) && (uintptr_t)o > 0x10000 && !IsBadReadPtr(o + off, 64) ? (const float *)(o + off) : NULL;
+    return o && !((uintptr_t)o & 7) && (uintptr_t)o > 0x10000 && gh_rd_ok(o + off, 64) ? (const float *)(o + off) : NULL;
 }
 static int gun_ortho(const float *m)
 {

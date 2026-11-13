@@ -1,3 +1,5 @@
+// (rubber-banding check 2026-11-12, as in FloodBots: IsBadReadPtr is a kernel query - per frame per gun candidate it cost 12 - 30 ms a frame there)
+static int gh_rd_ok(const void *p, size_t n) { int ok = 1; __try { volatile char a = *(const volatile char *)p, z = ((const volatile char *)p)[n - 1]; (void)a; (void)z; } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; } return ok; }
 // (the tester 2026-10-30: "chopper mounted guns aren't shooting") the line from the gun stopped on the helicopter's own body
 // (2.5 m out is still inside a transport's cabin / under its rotor) or on the target vehicle's hull: a hit within 4 m of
 // the target counts as clear, and from a helicopter the line starts 6 m out.
@@ -78,20 +80,20 @@ static DWORD WINAPI weapscan_thread(LPVOID unused)
 }
 static void weapscan_start(void) { if (!g_wsThread) { g_wsThread = CreateThread(NULL, 0, weapscan_thread, NULL, 0, NULL); if (g_wsThread) SetThreadPriority(g_wsThread, THREAD_PRIORITY_BELOW_NORMAL); } }
 static void weapscan_stop(void) { if (g_wsThread) { InterlockedExchange(&g_wsStop, 1); WaitForSingleObject(g_wsThread, 5000); CloseHandle(g_wsThread); g_wsThread = NULL; } }
-static int weap_ok(void *w) { return w && !((uintptr_t)w & 7) && !IsBadReadPtr(w, 0x300) && *(uintptr_t *)w == H->image + RVA_SERVER_WEAPON_VT; }
+static int weap_ok(void *w) { return w && !((uintptr_t)w & 7) && gh_rd_ok(w, 0x300) && *(uintptr_t *)w == H->image + RVA_SERVER_WEAPON_VT; }
 static const float *gun_mc(const Gunner *g, void *v, int c)
 {
     if (g->root[c] == 2) return weap_ok(g->wobj[c]) ? (const float *)((char *)g->wobj[c] + g->off[c]) : NULL;
     char *o = g->root[c] ? (char *)g->pl : (char *)v;
     if (!o) return NULL;
-    if (g->po[c] >= 0) { if (IsBadReadPtr(o + g->po[c], 8)) return NULL; o = FIELD(o, g->po[c], char *); if (!o || ((uintptr_t)o & 7) || (uintptr_t)o < 0x10000) return NULL; }
-    if (g->po2[c] >= 0) { if (IsBadReadPtr(o + g->po2[c], 8)) return NULL; o = FIELD(o, g->po2[c], char *); if (!o || ((uintptr_t)o & 7) || (uintptr_t)o < 0x10000) return NULL; }
-    return !IsBadReadPtr(o + g->off[c], 64) ? (const float *)(o + g->off[c]) : NULL;
+    if (g->po[c] >= 0) { if (!gh_rd_ok(o + g->po[c], 8)) return NULL; o = FIELD(o, g->po[c], char *); if (!o || ((uintptr_t)o & 7) || (uintptr_t)o < 0x10000) return NULL; }
+    if (g->po2[c] >= 0) { if (!gh_rd_ok(o + g->po2[c], 8)) return NULL; o = FIELD(o, g->po2[c], char *); if (!o || ((uintptr_t)o & 7) || (uintptr_t)o < 0x10000) return NULL; }
+    return gh_rd_ok(o + g->off[c], 64) ? (const float *)(o + g->off[c]) : NULL;
 }
 static const float *gun_m(void *v, int po, int off)
 {
     char *o = po < 0 ? (char *)v : FIELD(v, po, char *);
-    return o && !((uintptr_t)o & 7) && (uintptr_t)o > 0x10000 && !IsBadReadPtr(o + off, 64) ? (const float *)(o + off) : NULL;
+    return o && !((uintptr_t)o & 7) && (uintptr_t)o > 0x10000 && gh_rd_ok(o + off, 64) ? (const float *)(o + off) : NULL;
 }
 static int gun_ortho(const float *m)
 {
