@@ -45,7 +45,7 @@ static int solid_wall(const float *c0, float dx, float dz, float from, float to,
     if (dist) *dist = best;
     return n == 2;
 }
-typedef struct Drive { ULONGLONG cornerUntil; float corner[3], outgoing; ULONGLONG junctionLogAt; int trustLogged; int exitDone, exitOn, exitDir; ULONGLONG exitAt, exitProbeAt; float exitPos[3], exitTurn; int finalRun, approachRetries, approachFlag; float blockedApproach[3], failedStart[3]; ULONGLONG retryStartUntil; ULONGLONG rearAt; float rearRoom; ULONGLONG finalAt, finalChkAt; float finalPos[3]; ULONGLONG noMaskSince, navWaitAt; int checkedFront, yield; ULONGLONG startAt, lookAt, edgeAt; float freeC, freeL, freeR; void *veh; ULONGLONG progressAt, reverseUntil, stoppedSince, exitFrom, noRouteSince, traceAt; float progressPos[3], reverseTurn, roadGoal[3], planGoal[3]; int stuck; ULONGLONG turnAroundAt; float stuckYaw; int xfRejected;
+typedef struct Drive { ULONGLONG cornerUntil; float corner[3], outgoing; ULONGLONG junctionLogAt; int trustLogged; int exitDone, exitOn, exitDir, reposition, repositionTries; ULONGLONG exitAt, exitProbeAt; float exitPos[3], exitTurn; int finalRun, approachRetries, approachFlag; float blockedApproach[3], failedStart[3]; ULONGLONG retryStartUntil; ULONGLONG rearAt; float rearRoom; ULONGLONG finalAt, finalChkAt; float finalPos[3]; ULONGLONG noMaskSince, navWaitAt; int checkedFront, yield; ULONGLONG startAt, lookAt, edgeAt; float freeC, freeL, freeR; void *veh; ULONGLONG progressAt, reverseUntil, stoppedSince, exitFrom, noRouteSince, traceAt; float progressPos[3], reverseTurn, roadGoal[3], planGoal[3]; int stuck; ULONGLONG turnAroundAt; float stuckYaw; int xfRejected;
                        float motionYawPos[3], stYaw, stTurn; int lastSign, xfKey, stN; ULONGLONG signAt, stAt; float lastFwd, motionPos[3], motionYaw, matrixOff, avoidTurn; ULONGLONG yieldSince; ULONGLONG motionPosAt, motionAt; int motionN; int onNet, onLine, queueing, turningAround; float netGoal[3], cross, queueGap, footAhead, speed, speedPos[3], prevErr; ULONGLONG speedAt, queueAt, queueSince, blockStillSince, passUntil, laneUntil; int crewOut; } Drive;
 static Drive g_drv[MAX_BOTS];
 // (On foot: the next time it sits in any vehicle is a new drive. Getting back into the same car kept exitFrom set: it got straight out again.)
@@ -929,8 +929,8 @@ static int drive_leave_slot(Bot *b, Drive *d, void *v, const float *vp, ULONGLON
 {
     if (d->exitDone) return 0;
     if (!d->exitAt) { d->exitAt = t; memcpy(d->exitPos, vp, 12); }
-    if (t - d->exitAt > 10000 || dist2d(vp, d->exitPos) > 15) {
-        d->exitDone = 1;
+    if (t - d->exitAt > (d->reposition ? 3500 : 10000) || dist2d(vp, d->exitPos) > (d->reposition ? 4.5f : 15)) {
+        d->exitDone = 1; d->reposition = 0;
         return 0;
     }
     if (t >= d->exitProbeAt) {
@@ -943,7 +943,7 @@ static int drive_leave_slot(Bot *b, Drive *d, void *v, const float *vp, ULONGLON
         solid_wall(center, -rx, -rz, width + 0.1f, 4, &dl);
         solid_wall(center, rx, rz, width + 0.1f, 4, &dr);
         float ahead = drive_slot_room(vp, yaw, nose, width, 1);
-        if ((dl + dr > 6.4f || fminf(dl, dr) > 2.6f) && ahead > 3.2f) {
+        if (!d->reposition && (dl + dr > 6.4f || fminf(dl, dr) > 2.6f) && ahead > 3.2f) {
             d->exitDone = 1;
             return 0;
         }
@@ -951,8 +951,8 @@ static int drive_leave_slot(Bot *b, Drive *d, void *v, const float *vp, ULONGLON
         if (!d->exitDir) d->exitDir = ahead + 1.2f >= behind ? 1 : -1;
         if (d->exitDir > 0 && ahead < 1.1f && behind > 2.5f) d->exitDir = -1;
         if (d->exitDir < 0 && behind < 1.1f && ahead > 2.5f) d->exitDir = 1;
-        if ((d->exitDir > 0 ? ahead : behind) < 1.1f) {
-            d->exitDone = 1;
+        if ((d->exitDir > 0 ? ahead : behind) < (d->reposition ? 2.5f : 1.1f)) {
+            d->exitDone = 1; d->reposition = 0;
             return 0;
         }
         d->exitTurn = d->exitDir < 0 ? 0 : fmaxf(-0.24f, fminf(0.24f, (dl - dr) * 0.12f));
@@ -964,7 +964,7 @@ static int drive_leave_slot(Bot *b, Drive *d, void *v, const float *vp, ULONGLON
     }
     b->fwd = d->speed < 4.2f ? (float)d->exitDir : 0;
     b->turn = d->exitTurn;
-    b->why = "leaving parking space";
+    b->why = d->reposition ? "repositioning for road" : "leaving parking space";
     d->progressAt = t;
     memcpy(d->progressPos, vp, 12);
     return 1;
@@ -1145,11 +1145,20 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
             }
             static unsigned logged; if (logged++ < 20) H->log("drive: %s no road from %.0f %.0f to %.0f %.0f (%s)", (char *)b->player + OFF_PLAYER_NAME, from[0], from[2], to[0], to[2], nav_last_error()); }
         if (n) {   // (the car moved on while the route was planned: pick it up at the nearest of its first points)
-            d->retryStartUntil = d->cornerUntil = 0; b->npts = n; b->planAt = t; d->noRouteSince = 0; memcpy(d->planGoal, b->target, 12);
+            d->retryStartUntil = d->cornerUntil = 0; d->repositionTries = 0; b->npts = n; b->planAt = t; d->noRouteSince = 0; memcpy(d->planGoal, b->target, 12);
             b->wp = 0;
             if (!vn && n > 1 && dist2d(vp, b->path) < 4 && vnet_join_clear(vp, b->path + 3)) b->wp = 1;
         }
         else if (!deferred) { b->npts = 0; b->planAt = t; if (!d->noRouteSince) d->noRouteSince = t; }
+    }
+    if (!b->npts && d->noRouteSince && t - d->noRouteSince > 2000 && d->speed < 2 &&
+        d->repositionTries < 2 && toTarget > VEH_ARRIVE_M + 10) {
+        // A stationary car or the wall immediately beside it can obscure every road attachment.
+        // Move a car length along its clear axis, then plan from the new position.
+        d->reposition = 1; d->repositionTries++; d->exitOn = d->exitDone = d->exitDir = 0;
+        d->exitAt = d->exitProbeAt = d->retryStartUntil = d->noRouteSince = 0;
+        d->roadGoal[0] = 0; b->planAt = t;
+        if (drive_leave_slot(b, d, v, vp, t)) return 1;
     }
     if (!b->npts && d->noRouteSince && t - d->noRouteSince > 3000) {
         if (b->targetFlag >= 0 && toTarget < 150) { d->finalRun = 1; d->finalAt = t; d->finalChkAt = 0; return 1; }
