@@ -217,7 +217,7 @@ typedef void (*InputDigital_t)(void *state, unsigned hash, char pressed);
 typedef void (*InputAnalog_t)(void *state, unsigned hash, float level);
 static InputCopy_t o_inputCopy;
 static CallHook g_hookCopy;
-enum { BTN_FIRE = 1, BTN_SPRINT = 2, BTN_JUMP = 4, BTN_INTERACT = 8, BTN_MELEE = 16, BTN_RELOAD = 32, BTN_ZOOM = 64, BTN_CROUCH = 128, BTN_EXIT = 256, BTN_LEAN = 512, BTN_CHUTE = 1024, BTN_GL = 2048, BTN_GADGET1 = 4096, BTN_GADGET2 = 8192, BTN_PRIMARY = 16384, BTN_STATIC = 32768, BTN_WEAPON1 = 65536, BTN_WEAPON2 = 131072, BTN_PICKUP = 262144, BTN_COUNT = 19 };
+enum { BTN_FIRE = 1, BTN_SPRINT = 2, BTN_JUMP = 4, BTN_INTERACT = 8, BTN_MELEE = 16, BTN_RELOAD = 32, BTN_ZOOM = 64, BTN_CROUCH = 128, BTN_EXIT = 256, BTN_LEAN = 512, BTN_CHUTE = 1024, BTN_GL = 2048, BTN_GADGET1 = 4096, BTN_GADGET2 = 8192, BTN_PRIMARY = 16384, BTN_STATIC = 32768, BTN_WEAPON1 = 65536, BTN_WEAPON2 = 131072, BTN_PICKUP = 262144, BTN_COUNT = 19, BTN_BOARD_RELEASE = 1u << 19, BTN_CHUTE_RELEASE = 1u << 20, BTN_USE_RELEASE = 1u << 21, BTN_GEAR_RELEASE = 1u << 22 };
 static const unsigned kBtnHash[BTN_COUNT] = { EIA_FIRE, EIA_SPRINT, EIA_JUMP, EIA_INTERACT, EIA_MELEE, EIA_RELOAD, EIA_ZOOM, EIA_CROUCH, EIA_CHANGE_VEHICLE, EIA_VEHICLE_POSE, EIA_PARACHUTE, EIA_SWITCH_GL, EIA_SWITCH_GADGET1, EIA_SWITCH_GADGET2, EIA_SWITCH_PRIMARY, EIA_SWITCH_STATIC, EIA_SELECT_WEAPON1, EIA_SELECT_WEAPON2, EIA_PICKUP };
 static const char *kBtnNames[BTN_COUNT] = { "fire", "sprint", "jump", "interact", "melee", "reload", "zoom", "crouch", "exit", "lean", "chute", "launcher", "gadget1", "gadget2", "primary", "static", "weapon1", "weapon2", "pickup" };
 static unsigned g_testHash;   // "presshash <hex>": that input held (digital) on every bot, for finding keys
@@ -240,6 +240,27 @@ static void h_inputCopy(void *dst, void *src)
         InputTrack_t track = (InputTrack_t)(H->image + RVA_INPUT_TRACK);
         for (int k = 0; k < BTN_COUNT; k++)
             if (btn & (1u << k)) { track(src, kBtnHash[k], 1); ((InputDigital_t)(H->image + RVA_INPUT_SET_DIGITAL))(src, kBtnHash[k], 1); }
+        if (btn & BTN_GEAR_RELEASE) {
+            const unsigned keys=BTN_GADGET1|BTN_GADGET2|BTN_PRIMARY|BTN_FIRE;
+            for (int k=0;k<BTN_COUNT;k++) if ((keys & ~btn) & (1u<<k)) {
+                track(src,kBtnHash[k],1);
+                ((InputDigital_t)(H->image+RVA_INPUT_SET_DIGITAL))(src,kBtnHash[k],0);
+            }
+        }
+        if (btn & BTN_CHUTE_RELEASE) {
+            track(src, EIA_PARACHUTE, 1); track(src, EIA_JUMP, 1);
+            ((InputDigital_t)(H->image + RVA_INPUT_SET_DIGITAL))(src, EIA_PARACHUTE, 0);
+            ((InputDigital_t)(H->image + RVA_INPUT_SET_DIGITAL))(src, EIA_JUMP, 0);
+        }
+        if (btn & BTN_USE_RELEASE) {
+            track(src, EIA_INTERACT, 1);
+            ((InputDigital_t)(H->image + RVA_INPUT_SET_DIGITAL))(src, EIA_INTERACT, 0);
+        }
+        if (btn & BTN_BOARD_RELEASE) {
+            track(src, EIA_INTERACT, 1); track(src, EIA_CHANGE_VEHICLE, 1);
+            ((InputDigital_t)(H->image + RVA_INPUT_SET_DIGITAL))(src, EIA_INTERACT, 0);
+            ((InputDigital_t)(H->image + RVA_INPUT_SET_DIGITAL))(src, EIA_CHANGE_VEHICLE, 0);
+        }
         if (g_testHash) { track(src, g_testHash, 1); ((InputDigital_t)(H->image + RVA_INPUT_SET_DIGITAL))(src, g_testHash, 1); }
         if (pitch || heliOwns) { track(src, EIA_PITCH, 1); ((InputAnalog_t)(H->image + RVA_INPUT_SET_ANALOG))(src, EIA_PITCH, pitch); }
         if (yaw || heliOwns) { track(src, EIA_YAW, 1); ((InputAnalog_t)(H->image + RVA_INPUT_SET_ANALOG))(src, EIA_YAW, yaw); }

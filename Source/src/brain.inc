@@ -26,6 +26,8 @@ typedef struct Bot {
     int action;                     // pseudo-player action id (1..20) pressed this frame, 0 none
     unsigned buttons;               // BTN_* held this frame (pressed through the input-copy hook)
     float pitch;
+    ULONGLONG openingCheck, openingUntil, crossedUntil, brFacingAt;
+    float openingNear[3], openingFar[3], crossedAt[3]; int openingIn;
     int brStage;                    // breaching a panel: 0 no, 1 E (door), 2 knife, 3 shots
     int brShut;                     // stage 1: still shut after the first E
     ULONGLONG brAt, brNext;         // stage start; no new breach before brNext
@@ -40,6 +42,7 @@ typedef struct Bot {
     ULONGLONG attackChooseAt;       // next time it may change the flag it attacks
     float steerPrev, flipYaw, flipWant, flipDist; unsigned flips;
     float stuckAt[3], escape[3]; int stuckRepeat; ULONGLONG stuckFirst, escapeUntil;   // repeated stuck -> escape point
+    ULONGLONG boardReleaseUntil;
     ULONGLONG takingAt;             // pressing E at a car it is taking
     void *crewVeh; int crewFlag, crewGo; ULONGLONG crewAt; float crewPos[3];   // the vehicle it left to walk to a flag: only ever compared, never read
     void *noVeh; ULONGLONG noVehUntil;   // a car it couldn't get into (4 s of E): left alone for a minute
@@ -113,6 +116,7 @@ static volatile LONG g_unblockAll;   // "unblock": every temporary grid block ba
 static void target_mark_alive(const float *p);
 static void lifts_level_reset(void);   // lifts.inc
 static int lift_ride(Bot *b, void *soldier, const float *pos, ULONGLONG t, int activeOnly);
+static int parachute_fall(int i, Bot *b, void *soldier, const float *pos, ULONGLONG t, const float *aim);
 static int parachute_tick(int i, Bot *b, void *soldier, const float *pos, ULONGLONG t);   // parachute.inc
 static ULONGLONG g_airAt[MAX_BOTS];   // last time each bot was aboard an aircraft (heli.inc): leaving one opens the chute at once
 static void vehicles_level_reset(void);   // drive.inc
@@ -137,6 +141,9 @@ static void *vehicle_known_ptr(int k);
 static int soldier_seated(const float *pos);
 static int soldier_riding(const float *pos, const float *vel);
 static int vehicle_known_has(void *v);
+static int known_index(void *v);
+static void getin_boarded(int i, void *v);
+static void *player_in_vehicle(void *p);
 static const float *vehicle_xf(void *v);   // drive.inc
 static int vehicle_near(const float *p, float r);   // drive.inc
 static int pax_think(int i, Bot *b, void *soldier, void *v, int team);
@@ -760,7 +767,7 @@ static int breach_start(Bot *b, const float *pos, const float *aim, ULONGLONG t)
     for (int o = 0; o < MAX_BOTS; o++)
         if (&g_bot[o] != b && g_bot[o].brStage && dist2d(g_bot[o].brHit, h) < 1.5f && fabsf(g_bot[o].brHit[1] - h[1]) < 1.5f) { b->brNext = t + 600; return 0; }
     b->brStage = k >= 0 && g_breach[k].kind == 'b' ? 2 : 1;   // a known pane: straight to the knife (by body class it was wrong: "glass" classes are walls too)
-    b->brShut = 1;
+    b->brShut = 1; b->brFacingAt = t;
     b->brAt = t;
     memcpy(b->brHit, h, 12); memcpy(b->brFrom, a, 12);
     b->brDir[0] = dx; b->brDir[1] = dz;
@@ -779,6 +786,13 @@ static void breach_tick(Bot *b, void *soldier, ULONGLONG t)
     float want = atan2f(b->brDir[0], b->brDir[1]);
     // Still shut after two presses: some doors open from a keypad on the wall beside them - face 35 degrees to one
     // side, press E, then the other side (1.1 - 2.5 s into the E stage).
+    if (b->brStage == 1 && b->brFacingAt) {
+        if (fabsf(wrap_pi(want-soldier_yaw(soldier))) > 0.42f && t-b->brFacingAt < 1400) {
+            b->fwd = b->strafe = 0; b->turn = turn_input(soldier_yaw(soldier),want,3);
+            b->buttons |= BTN_USE_RELEASE; b->brAt = t; return;
+        }
+        b->brFacingAt = 0; b->brAt = t;
+    }
     ULONGLONG el0 = t - b->brAt;
     if (b->brStage == 1 && b->brShut && el0 >= 1100) want += el0 < 1800 ? 0.6f : -0.6f;
     b->turn = turn_input(soldier_yaw(soldier), want, 3.0f);
@@ -790,6 +804,7 @@ static void breach_tick(Bot *b, void *soldier, ULONGLONG t)
     // the door again as soon as it had opened.
     ULONGLONG el = t - b->brAt;
     if (b->brStage == 1 && (el < 250 || (b->brShut && ((el >= 800 && el < 1050) || (el >= 1450 && el < 1700) || (el >= 2150 && el < 2400))))) b->buttons |= BTN_INTERACT;
+    else if (b->brStage == 1) b->buttons |= BTN_USE_RELEASE;
     if (b->brStage == 1 && el >= 300) {   // open yet? stop at once
         float probe[3] = { b->brHit[0] + b->brDir[0] * 0.1f, b->brHit[1], b->brHit[2] + b->brDir[1] * 0.1f };
         b->brShut = ray_cast(b->brFrom, probe, NULL, NULL);
@@ -814,16 +829,88 @@ static void breach_tick(Bot *b, void *soldier, ULONGLONG t)
     if (b->brClass >= 0) g_panelClass[b->brClass].failed++;
     breach_learn(b->brHit, 'n');
     if (g_nav && !g_navBuilding) nav_block_towards(g_nav, b->brFrom[0], b->brFrom[1] - 1.2f, b->brFrom[2], b->brHit[0], b->brHit[2]);
-    b->brStage = 0; b->brNext = t + 20000; b->npts = 0;
+    b->brStage = 0; b->openingUntil = 0; b->brNext = t + 1200; b->npts = 0; b->planAt = 0;
 }
 
 // [combat.inc hook]
 static int bot_block_towards(float x, float y, float z, float tx, float tz);   // (below: not when stuck in a crowd)
 #include "kits.inc"
+static int foot_connector(const float *a, const float *b);
+static void steer_towards(Bot *b, void *soldier, const float *to);
+static int supply_flag_site(const float *pos);
 #include "combat.inc"
 #include "objectives.inc"
 #include "movement.inc"
 #include "camp.inc"
+static int floor_continuous(const float *a, const float *b);
+static int foot_connector(const float *a, const float *b)
+{
+    float distance = dist2d(a, b);
+    if (distance < 0.15f) return fabsf(a[1] - b[1]) < 0.45f;
+    if (distance > 40 || fabsf(a[1] - b[1]) > 1.0f + distance * 0.85f) return 0;
+    return nav_segment_clear(ray_cast, a, b) && floor_continuous(a, b);
+}
+// Project onto the outgoing segment in XZ and compare height at that position, not at the
+// corner or its distant endpoint. A vertically stacked street must fail the height check.
+static int passed_on_grade(const float *p, const float *a, const float *b, float width, float height,
+                           float stride, float maxGrade, float *ahead)
+{
+    float dx=b[0]-a[0], dz=b[2]-a[2], length=hypotf(dx,dz);
+    if (length<1 || fabsf(b[1]-a[1])>maxGrade*length) return 0;
+    float x=p[0]-a[0], z=p[2]-a[2];
+    float along=(x*dx+z*dz)/length;
+    if (along<0.4f || along>=length || fabsf(x*dz-z*dx)>width*length ||
+        fabsf(p[1]-(a[1]+(b[1]-a[1])*along/length))>height) return 0;
+    float u=fminf(1,(along+stride)/length);
+    for (int j=0;j<3;j++) ahead[j]=a[j]+u*(b[j]-a[j]);
+    return 1;
+}
+// Find the usable part of a nearby wall by sampling along its face. A doorway needs both
+// an accessible approach on this side and supported ground on the far side.
+static const float *wall_opening(Bot *b, const float *p, const float *goal, ULONGLONG t)
+{
+    if (t < b->openingUntil) {
+        if (dist2d(p,b->openingFar) < 0.95f && fabsf(p[1]-b->openingFar[1]) < 1.1f) {
+            H->log("opening: %s crossed the passage at %.1f %.1f %.1f", (char *)b->player+OFF_PLAYER_NAME,
+                   b->openingFar[0],b->openingFar[1],b->openingFar[2]);
+            b->openingUntil=0; b->openingCheck=t+850; b->crossedUntil=t+8000;
+            memcpy(b->crossedAt,p,12); return NULL;
+        }
+        if (dist2d(p,b->openingNear)<0.8f) b->openingIn=1;
+        return b->openingIn ? b->openingFar : b->openingNear;
+    }
+    if (t<b->openingCheck || b->brStage || dist2d(p,goal)<1.1f || fabsf(goal[1]-p[1])>12) return NULL;
+    b->openingCheck=t+550+(b->seed%180);
+    float length=dist2d(p,goal), dx=(goal[0]-p[0])/length, dz=(goal[2]-p[2])/length;
+    float reach=fminf(length,3.0f), eye[3]={p[0],p[1]+1.15f,p[2]}, end[3]={p[0]+dx*reach,eye[1],p[2]+dz*reach},hit[3],normal[3];
+    if (!ray_cast(eye,end,hit,normal) || fabsf(normal[1])>0.35f) return NULL;
+    uintptr_t body=*(uintptr_t *)g_lastHit.rest;
+    uintptr_t cls=body && !IsBadReadPtr((void *)body,8) ? *(uintptr_t *)body-H->image : 0;
+    if (cls==0x2808310 || cls==0x2819780) return NULL; // a door directly in front already has an opener
+    float flat=hypotf(normal[0],normal[2]);
+    if (flat<0.6f) return NULL;
+    dx=-normal[0]/flat; dz=-normal[2]/flat;
+    int first=(goal[0]-hit[0])*(-dz)+(goal[2]-hit[2])*dx>0 ? 1 : -1;
+    for (int k=0;k<8;k++) {
+        float side=(k%2 ? -first : first)*(1.15f+1.0f*(k/2));
+        float x=hit[0]-dz*side,z=hit[2]+dx*side;
+        float approach[3]={x-dx*1.0f,p[1],z-dz*1.0f},exitPoint[3]={x+dx*1.4f,p[1],z+dz*1.4f};
+        float top[3]={exitPoint[0],p[1]+0.95f,exitPoint[2]},bot[3]={exitPoint[0],p[1]-1.0f,exitPoint[2]};
+        if (t<b->crossedUntil && fabsf(b->crossedAt[1]-p[1])<1.5f && dist2d(b->crossedAt,approach)<2.8f) continue;
+        if (!foot_connector(p,approach) || !ray_cast(top,bot,exitPoint,NULL)) continue;
+        if (!foot_connector(approach,exitPoint)) {
+            float door[3],from[3];
+            if (!panel_dir(approach,dx,dz,1.9f,door,from)) continue;
+            int c=panel_class_of_last_hit(), spot=breach_find(door,1.2f);
+            if ((spot>=0 && g_breach[spot].kind=='n') || (c<0 ||
+                (g_panelClass[c].vt!=0x2808310 && g_panelClass[c].vt!=0x2819780 && !(spot>=0 && g_breach[spot].kind=='o')))) continue;
+        }
+        memcpy(b->openingNear,approach,12); memcpy(b->openingFar,exitPoint,12);
+        b->openingIn=dist2d(p,approach)<0.8f; b->openingUntil=t+6500;
+        return b->openingIn ? b->openingFar : b->openingNear;
+    }
+    return NULL;
+}
 #include "routes.inc"
 #include "human_routes.inc"
 #include "route_refine.inc"
@@ -971,7 +1058,7 @@ static int plan_stopgap(int i, Bot *b, const float *pos, ULONGLONG t)
                 if (d < bd && fabsf(ob->path[q * 3 + 1] - pos[1]) < 2.5f) { bd = d; best = o; bestK = q; }
             }
         }
-        if (best >= 0 && (bd < 2 || nav_direct_route(g_nav, ray_cast, pos, &g_bot[best].path[bestK * 3]))) {
+        if (best >= 0 && foot_connector(pos, &g_bot[best].path[bestK * 3])) {
             n = g_bot[best].npts - bestK;
             memcpy(b->path, &g_bot[best].path[bestK * 3], (size_t)n * 12);
             k = g_bot[best].route; b->lroute = g_bot[best].lroute;
@@ -982,7 +1069,7 @@ static int plan_stopgap(int i, Bot *b, const float *pos, ULONGLONG t)
         // clear, else the grid's way to its nearest point (60 m at most, one such search a frame, capped)
         static float tail[BRAIN_PATH_MAX * 3]; float join[3];
         int nt = human_route_far(pos, b->target, join, tail, BRAIN_PATH_MAX - 1);
-        if (nt && (dist2d(pos, join) < 2 || nav_segment_clear(ray_cast, pos, join))) {
+        if (nt && foot_connector(pos, join)) {
             memcpy(b->path, pos, 12); memcpy(&b->path[3], tail, (size_t)nt * 12); n = nt + 1;
             b->lroute = g_lrPick;
         } else if (nt && dist2d(pos, join) < 60) {
@@ -992,7 +1079,7 @@ static int plan_stopgap(int i, Bot *b, const float *pos, ULONGLONG t)
                 static float lead[BRAIN_PATH_MAX * 3];
                 extern int g_syncMaxExpanded; g_syncMaxExpanded = 8000;
                 int nl = nav_find_path_sync(g_nav, ray_cast, pos[0], pos[1], pos[2], join[0], join[1], join[2], lead, BRAIN_PATH_MAX / 2); g_syncMaxExpanded = 0;
-                if (nl >= 2 && nl + nt <= BRAIN_PATH_MAX) {
+                if (nl >= 2 && nl + nt <= BRAIN_PATH_MAX && foot_connector(&lead[3 * (nl - 1)], join)) {
                     memcpy(b->path, lead, (size_t)nl * 12); memcpy(&b->path[nl * 3], tail, (size_t)nt * 12); n = nl + nt;
                     b->lroute = g_lrPick;
                 }
@@ -1000,7 +1087,7 @@ static int plan_stopgap(int i, Bot *b, const float *pos, ULONGLONG t)
         }
     }
     if (!n) return 0;
-    b->npts = n; b->wp = n > 1 ? 1 : 0; b->route = k; b->noRouteSince = 0;
+    b->npts = n; b->wp = 0; b->route = k; b->noRouteSince = 0;
     g_stopgapRoute[i] = 1;
     b->planAt = t - ((b->targetFlag >= 0 || b->objRoute) ? 15000 : 1000);   // (plan() looks again in 5 s)
     g_stopgaps++;
@@ -1039,8 +1126,8 @@ static int resume_route(int i, Bot *b, const float *pos, ULONGLONG t)
         if (d < bd && fabsf(q[1] - pos[1]) < 2.5f) { bd = d; best = k; }
     }
     if (best < 0) return 0;
-    if (best + 1 < r->npts - 1 && fabsf(r->path[(best + 1) * 3 + 1] - pos[1]) < 2.5f && nav_segment_clear(ray_cast, pos, &r->path[(best + 1) * 3])) best++;   // (the next one in view: on, not back)
-    else if (bd > 2.5f && !nav_segment_clear(ray_cast, pos, &r->path[best * 3])) return 0;
+    if (best + 1 < r->npts - 1 && fabsf(r->path[(best + 1) * 3 + 1] - pos[1]) < 2.5f && foot_connector(pos, &r->path[(best + 1) * 3])) best++;   // (the next one in view: on, not back)
+    else if (!foot_connector(pos, &r->path[best * 3])) return 0;
     int n = r->npts - best;
     memcpy(b->path, &r->path[best * 3], (size_t)n * 12);
     b->npts = n; b->wp = 0; b->route = r->route; b->lroute = r->lroute; b->planAt = t; b->noRouteSince = 0;
@@ -1057,7 +1144,7 @@ static void plan(int i, Bot *b, const float *pos)
     if (!g_nav || g_navBuilding) {   // no grid yet (a new map): a saved route if one passes close by, else nothing
         if ((b->targetFlag >= 0 || b->objRoute) && !(b->npts && t < b->planAt + 8000)) {
             int k = -1, n = routes_pick(pos, b->target, b->path, BRAIN_PATH_MAX, &k);
-            b->npts = n; b->wp = n > 1 ? 1 : 0; b->planAt = t; b->route = k;
+            b->npts = n; b->wp = 0; b->planAt = t; b->route = k;
         }
         return;
     }
@@ -1093,11 +1180,11 @@ static void plan(int i, Bot *b, const float *pos)
     if ((b->targetFlag >= 0 || b->objRoute) && own) g_plansOwn++;
     if ((b->targetFlag >= 0 || b->objRoute) && !own) {
         int n = human_route_to_flag(pos, b->target, b->path, BRAIN_PATH_MAX);
-        if (n) { nav_cancel_path(i); b->planAt = t; b->npts = n; b->wp = n > 1 ? 1 : 0; b->route = -1; b->lroute = g_lrPick; g_learnedFirst++; return; }
+        if (n) { nav_cancel_path(i); b->planAt = t; b->npts = n; b->wp = 0; b->route = -1; b->lroute = g_lrPick; g_learnedFirst++; return; }
         n = human_route_leg(pos, b->target, b->path, BRAIN_PATH_MAX);   // a learned route part of the way (plans on from its end)
-        if (n) { nav_cancel_path(i); b->planAt = t; b->npts = n; b->wp = n > 1 ? 1 : 0; b->route = -1; b->lroute = g_lrPick; return; }
+        if (n) { nav_cancel_path(i); b->planAt = t; b->npts = n; b->wp = 0; b->route = -1; b->lroute = g_lrPick; return; }
         int k = -1; g_routePickSeed = route_seed(i, b); n = routes_pick(pos, b->target, b->path, BRAIN_PATH_MAX, &k);
-        if (n) { nav_cancel_path(i); b->planAt = t; b->npts = n; b->wp = n > 1 ? 1 : 0; b->route = k; return; }
+        if (n) { nav_cancel_path(i); b->planAt = t; b->npts = n; b->wp = 0; b->route = k; return; }
     }
     b->route = -1;
     // A teammate already walking to the same target with a route that passes within 6 m of us (a clear straight line
@@ -1135,13 +1222,14 @@ static void plan(int i, Bot *b, const float *pos)
         int nt = human_route_far(pos, b->target, join, tail, BRAIN_PATH_MAX / 2);
         if (nt) {
             nav_set_path_owner(i);
-            int n = dist2d(pos, join) < 2 ? 0 : nav_find_path(g_nav, ray_cast, pos[0], pos[1], pos[2], join[0], join[1], join[2], b->path, BRAIN_PATH_MAX - nt);
-            int deferred = !n && dist2d(pos, join) >= 2 && nav_last_deferred();
+            int onJoin = dist2d(pos, join) < 2 && foot_connector(pos, join);
+            int n = onJoin ? 0 : nav_find_path(g_nav, ray_cast, pos[0], pos[1], pos[2], join[0], join[1], join[2], b->path, BRAIN_PATH_MAX - nt);
+            int deferred = !n && !onJoin && nav_last_deferred();
             nav_set_path_owner(-1);
             if (deferred) { plan_stopgap(i, b, pos, t); return; }
-            if (n || dist2d(pos, join) < 2) {
+            if (onJoin || (n && foot_connector(&b->path[(n - 1) * 3], join))) {
                 memcpy(&b->path[n * 3], tail, (size_t)nt * 12); n += nt;
-                b->planAt = t; b->npts = n; b->wp = n > 1 ? 1 : 0; b->route = -1; b->noRouteSince = 0; b->lroute = g_lrPick; g_learnedFar++;
+                b->planAt = t; b->npts = n; b->wp = 0; b->route = -1; b->noRouteSince = 0; b->lroute = g_lrPick; g_learnedFar++;
                 return;
             }
         }
@@ -1156,9 +1244,9 @@ static void plan(int i, Bot *b, const float *pos)
             int deferred = !n && nav_last_deferred();
             nav_set_path_owner(-1);
             if (deferred) { plan_stopgap(i, b, pos, t); return; }
-            if (n) {
+            if (n && foot_connector(&b->path[(n - 1) * 3], join)) {
                 n = routes_append(jr, jk, jrev, b->path, n, BRAIN_PATH_MAX, b->target);
-                b->planAt = t; b->npts = n; b->wp = n > 1 ? 1 : 0; b->route = jr; b->noRouteSince = 0;
+                b->planAt = t; b->npts = n; b->wp = 0; b->route = jr; b->noRouteSince = 0;
                 static unsigned logged; if (logged++ < 30) H->log("routes: %s plans %.0f m to saved route %s -> %s and follows it", (char *)b->player + OFF_PLAYER_NAME, dist2d(pos, join), g_routes[jr].from, g_routes[jr].to);
                 return;
             }
@@ -1187,13 +1275,16 @@ static void plan(int i, Bot *b, const float *pos)
     }
     b->planAt = t;
     b->npts = n;
-    b->wp = n > 1 ? 1 : 0;
+    b->wp = 0;
     // The route starts where the bot was when it asked; it may have moved on since. Pick up at the nearest of the first
     // points (and the one after it when that is still reachable in a straight line).
     if (n > 2) {
-        int best = 0; float bd = 1e9f;
-        for (int k = 0; k < n && k < 12; k++) { float d = dist2d(pos, &b->path[k * 3]) + 3 * fabsf(pos[1] - b->path[k * 3 + 1]); if (d < bd) { bd = d; best = k; } }   // (height counts: not a point on the floor below)
-        b->wp = best + 1 < n ? best + 1 : best;
+        float best = dist2d(pos, b->path);
+        for (int k = 1; k < n && k < 12; k++) {
+            const float *q = &b->path[k * 3];
+            float d = dist2d(pos, q);
+            if (d < best && fabsf(q[1] - pos[1]) < 2 && foot_connector(pos, q)) { best = d; b->wp = k; }
+        }
     }
 }
 
@@ -1241,13 +1332,18 @@ static void bot_think(int i)
         void *veh = player_vehicle(player, &seat);
         b->inVehicle = veh != NULL;
         if (!veh) { b->heliPilot = 0; b->roll = b->yawIn = b->throttleIn = 0; vehicle_onfoot_reset(i); }   // (out of a helicopter: no yaw / roll left held on foot)
+        if (veh) getin_boarded(i, veh);
+        if (veh && b->takingAt && b->takeVeh == veh) {
+            H->log("boarding: %s entered %s seat %d from its door", (char *)player + OFF_PLAYER_NAME, vehicle_name(veh), seat);
+            b->boardReleaseUntil = now_ms() + 300; b->takingAt = 0; b->takeVeh = NULL;
+        }
         if (veh) { b->alive = 1; vehicle_think(i, b, veh, seat, FIELD(player, OFF_PLAYER_TEAM, int)); return; }
     }
     void *soldier = bot_soldier(player);
     ULONGLONG t = now_ms();
     if (!soldier) {
         if (b->alive && g_learn) bl_note_death(g_learn, b->lastPos);
-        b->alive = 0; b->npts = 0; b->fwd = b->strafe = b->turn = 0; b->buttons = 0; b->brStage = 0; resume_drop(i);
+        b->alive = 0; b->openingUntil=0; b->npts = 0; b->fwd = b->strafe = b->turn = 0; b->buttons = 0; b->brStage = 0; resume_drop(i);
         return;
     }
     const float *pos = soldier_pos(soldier);
@@ -1256,7 +1352,36 @@ static void bot_think(int i)
     if (!b->alive) { b->alive = 1; memcpy(b->progressPos, pos, 12); b->progressAt = t; b->targetFlag = -1; b->route = -1; b->lroute = -1; routes_note_spawn(team, pos); b->spawnAt = t; memcpy(b->spawnPos, pos, 12); }
     if (heli_ledge(i, b, soldier, pos, team, t)) { b->alive = 1; return; }
     memcpy(b->lastPos, pos, 12);
+    // Sitting in a passenger seat (a shooting seat keeps the soldier as the controllable): stay while someone drives
+    // (and fight from there), else get out - E and the change-vehicle key in turn.
+    {
+        void *attached = player_in_vehicle(player);
+        int k = attached ? known_index(attached) : -1;
+        if (k >= 0 && !b->seatedSince) {
+            b->seatedSince = t; getin_boarded(i,attached);
+            if (b->takeVeh == attached && b->takingAt) {
+                H->log("boarding: %s entered a passenger seat in %s from its door", (char *)player + OFF_PLAYER_NAME, vehicle_name(attached));
+                b->boardReleaseUntil = t + 300; b->takeVeh = NULL; b->takingAt = 0;
+            }
+        }
+        if (k < 0) b->seatedSince = 0;
+        if (k >= 0) {
+            void *kv = vehicle_known_ptr(k);
+            int told = kv && kv == g_kickVeh && t < g_kickUntil;
+            if (!told && crew_follow_out_k(i, k, t)) { told = 1; static unsigned cl; static ULONGLONG clAt[MAX_BOTS]; if (t - clAt[i] > 6000 && cl++ < 30) { clAt[i] = t; H->log("drive: %s gets out (out with the player, passenger seat)", (char *)player + OFF_PLAYER_NAME); } }
+            if (told) { b->noVeh = kv; b->noVehUntil = t + 30000; }
+            if (!told && (vehicle_has_driver(k) || t - b->seatedSince < 3000)) { b->why = "passenger"; b->buttons = 0; if (!pax_think(i, b, soldier, kv, team)) combat_tick(i, b, soldier, team); b->fwd = b->strafe = 0; b->buttons |= BTN_LEAN; return; }
+            b->fwd = b->strafe = b->turn = 0;
+            if ((t / 300) % 5 == 0) b->buttons |= ((t / 1500) & 1) ? BTN_EXIT : BTN_INTERACT;
+            static unsigned logged;
+            if (t - b->seatedSince < 1600 && logged++ < 30) H->log("drive: %s is sitting in a car nobody drives - gets out", (char *)player + OFF_PLAYER_NAME);
+            return;
+        }
+    }
+
+
     if (drop_descent(i, b, soldier, pos, t)) return;
+    if (parachute_fall(i, b, soldier, pos, t, b->target)) { b->why = "parachuting"; b->progressAt = t; return; }
 
     if (lift_ride(b, soldier, pos, t, 1)) {
         b->idleAt = b->progAt = b->progressAt = t;
@@ -1371,36 +1496,6 @@ static void bot_think(int i)
         }
     }
 
-    // Sitting in a passenger seat (a shooting seat keeps the soldier as the controllable): stay while someone drives
-    // (and fight from there), else get out - E and the change-vehicle key in turn.
-    {
-        const float *v = (const float *)((char *)soldier + OFF_SOLDIER_VELOCITY);
-        int k = soldier_riding(pos, v);
-        // (0.3.13 log: every "passenger" was a bot standing beside a driven vehicle, seat field 0.) Only when the game has this player in that vehicle (player +0x1668, the field its own spawn reads)
-        if (k >= 0 && FIELD(player, OFF_PLAYER_VEHICLE, void *) != vehicle_known_ptr(k)) k = -1;
-        { void *pv = FIELD(player, OFF_PLAYER_VEHICLE, void *); static unsigned pl; if (pv && pl < 40) { int known = vehicle_known_has(pv); static void *lastPv[MAX_BOTS]; if (lastPv[i] != pv) { lastPv[i] = pv; pl++; H->log("passenger: %s has a soldier and the game has it in %s (seat field %d, %s, %.1f m from it)", (char *)player + OFF_PLAYER_NAME, known ? vehicle_name(pv) : "an unknown vehicle", FIELD(player, OFF_PLAYER_ENTRY_INDEX, int), k >= 0 ? "riding" : "not seen riding", known && veh_pos(pv) ? dist2d(pos, veh_pos(pv)) : -1.0f); } } }
-        if (k >= 0 && !b->seatedSince) b->seatedSince = t;
-        if (k < 0) b->seatedSince = 0;
-        if (k >= 0 && t - b->seatedSince > 1500) {
-            void *kv = vehicle_known_ptr(k);
-            int told = kv && kv == g_kickVeh && t < g_kickUntil;
-            // a human's vehicle that has stopped on the ground for 3 s: they've arrived - get out with them
-            if (kv && vehicle_has_driver(k) && !told) {
-                if (vehicle_known_stopped_human(k) && air_below(pos) < 3) { if (!b->seatedStillSince) b->seatedStillSince = t; }
-                else b->seatedStillSince = 0;
-                if (b->seatedStillSince && t - b->seatedStillSince > 3000) told = 1;
-            }
-            if (!told && crew_follow_out_k(i, k, t)) { told = 1; static unsigned cl; static ULONGLONG clAt[MAX_BOTS]; if (t - clAt[i] > 6000 && cl++ < 30) { clAt[i] = t; H->log("drive: %s gets out (out with the player, passenger seat)", (char *)player + OFF_PLAYER_NAME); } }
-            if (told) { b->noVeh = kv; b->noVehUntil = t + 30000; }
-            if (vehicle_has_driver(k) && !told) { b->why = "passenger"; b->buttons = 0; if (!pax_think(i, b, soldier, kv, team)) combat_tick(i, b, soldier, team); b->fwd = b->strafe = 0; b->buttons |= BTN_LEAN; return; }
-            b->fwd = b->strafe = b->turn = 0;
-            if ((t / 300) % 5 == 0) b->buttons |= ((t / 1500) & 1) ? BTN_EXIT : BTN_INTERACT;
-            static unsigned logged;
-            if (t - b->seatedSince < 1600 && logged++ < 30) H->log("drive: %s is sitting in a car nobody drives - gets out", (char *)player + OFF_PLAYER_NAME);
-            return;
-        }
-    }
-
     int assisting = 0;
     {   // (2026-11-16) Follow me / Need backup (commo rose, drive.inc help_*): go to the player; there, stay round them and fight
         float hp[3]; int nearP = 0;
@@ -1427,6 +1522,7 @@ static void bot_think(int i)
         float vp[3]; const char *vname = "";
         int k = calledK >= 0 ? calledK : vehicle_to_take(i, pos, b->target, vp, &vname);
         if (calledK >= 0) { memcpy(vp, gvp, 12); vname = gname; }
+        if (k >= 0 && b->takeVeh != vehicle_known_ptr(k)) b->takingAt = 0;
         if (calledK >= 0 && b->takingAt && t - b->takingAt > 12000) getin_stop(i, "E did nothing at its doors for 12 s");
         // (the tester 2026-11-07: "when I'm sitting still in a vehicle, they walk slowly towards the car and never enter"; no helicopter was boarded on foot all day) Within 3.5 m of the
         // centre a bot crept at a fifth of walking speed pressing E, and gave up after 4 s. Now: from 6 m it goes to a door - one of four points beside the vehicle (1.5 m out,
@@ -1460,12 +1556,18 @@ static void bot_think(int i)
                         ep[0] = pts[door[i]][0]; ep[2] = pts[door[i]][1];
                     }
                 }
-                float de = dist2d(pos, ep);
-                if (de > 0.9f) { b->turn = turn_input(soldier_yaw(soldier), atan2f(ep[0] - pos[0], ep[2] - pos[2]), 3.0f); b->fwd = de > 2.0f ? 1.0f : 0.6f; }
-                else { b->turn = turn_input(soldier_yaw(soldier), atan2f(vp[0] - pos[0], vp[2] - pos[2]), 3.0f); b->fwd = 0; }
-                b->strafe = 0;
-                if (de < 2.5f && (t / 200) % 2 == 0) b->buttons |= vair ? BTN_INTERACT | BTN_EXIT : BTN_INTERACT;   // (the second hash a human's E sends: earlier development code)
-                b->why = "getting in a car";
+                float de = dist2d(pos, ep), yaw = soldier_yaw(soldier);
+                float toDoor = atan2f(ep[0] - pos[0], ep[2] - pos[2]);
+                float toCabin = atan2f(vp[0] - pos[0], vp[2] - pos[2]);
+                float walking = wrap_pi(toDoor - yaw);
+                b->turn = turn_input(yaw, de < 2.2f ? toCabin : toDoor, 3.5f);
+                b->action = 0; b->pitch = 0;
+                b->fwd = de > 0.7f ? cosf(walking) : 0; b->strafe = de > 0.7f ? g_strafeSign * sinf(walking) : 0;
+                ULONGLONG phase = (t - b->takingAt) % 900;
+                if (de < 2.0f && fabsf(wrap_pi(toCabin - yaw)) < 0.95f && phase >= 180 && phase < 570)
+                    b->buttons |= BTN_INTERACT | BTN_EXIT;
+                else b->buttons |= BTN_BOARD_RELEASE;
+                b->why = "boarding at vehicle door";
                 return;
             }
             if (dist2d(b->target, vp) > 2) { memcpy(b->target, vp, 12); b->npts = 0; }
@@ -1509,13 +1611,16 @@ static void bot_think(int i)
     // (2.2 m: at 1.6 bots circled points they had all but reached, flipping left / right.) And on the same floor: in
     // Downtown's garage the route ran along the level below - bots "reached" each point from the floor above it, then
     // walked into the walls up there (the tester, 2026-10-25). A point more than 2.2 m above / below isn't reached yet.
-    while (b->npts && b->wp < b->npts && dist2d(pos, &b->path[b->wp * 3]) < 2.2f && fabsf(pos[1] - b->path[b->wp * 3 + 1]) < 2.2f) b->wp++;
+    while (b->npts && b->wp < b->npts && dist2d(pos, &b->path[b->wp * 3]) < 0.75f && fabsf(pos[1] - b->path[b->wp * 3 + 1]) < 1.1f) b->wp++;
     // Look ahead: when the point after the next one is in plain view (body-wide, knee and chest), head for it instead -
     // round corners smoothly rather than walking out to each route point and turning there. Every 300 ms.
     if (b->npts && b->wp + 1 < b->npts && t >= b->lookAheadAt && dist2d(pos, &b->path[b->wp * 3]) < 6) {
         b->lookAheadAt = t + 300;
         const float *nx = &b->path[(b->wp + 1) * 3];
-        if (fabsf(nx[1] - pos[1]) < 1.5f && dist2d(pos, nx) < 14 && nav_segment_clear(ray_cast, pos, nx) && floor_continuous(pos, nx)) b->wp++;
+        const float *corner=&b->path[3*b->wp]; float ahead[3];
+        if ((dist2d(pos,nx)<14 && foot_connector(pos,nx)) ||
+            (passed_on_grade(pos,corner,nx,1.25f,0.95f,2.5f,0.85f,ahead) && foot_connector(pos,ahead)))
+            b->wp++;
     }
     {   // (the tester 2026-11-12, earlier development code, ported 2026-11-15: "make sure bots stick to routes") pushed off it (a fight, a crowd, a wall): back onto the
         // route at the point it is nearest to among the next ones (40 m along at most) when that point is in plain view - not back to a point it
@@ -1587,6 +1692,10 @@ static void bot_think(int i)
         memcpy(b->progressPos, pos, 12);
         return;
     }
+    if (g_fight[i].state == CS_IDLE && !b->enemy) {
+        const float *opening=wall_opening(b,pos,hold || aim==waitAim ? b->target : aim,t);
+        if (opening) { aim=opening; hold=0; b->why="walking through doorway"; }
+    }
     // A door or pane in the way: open / break it before walking on (unless an enemy needs shooting first).
     if (b->brStage || breach_start(b, pos, aim, t)) {
         combat_tick(i, b, soldier, team);   // [combat.inc hook]
@@ -1595,7 +1704,7 @@ static void bot_think(int i)
     }
     steer_towards(b, soldier, aim);
     if (pool_exit(b, soldier, pos, t)) { b->why = "climbing out of water"; b->progressAt = t; memcpy(b->progressPos, pos, 12); return; }
-    if (parachute_tick(i, b, soldier, pos, t)) { b->why = "parachute"; b->progressAt = t; memcpy(b->progressPos, pos, 12); return; }   // off a roof / falling
+    if (parachute_tick(i, b, soldier, pos, t)) { b->why = "approaching jump-off point"; b->progressAt = t; memcpy(b->progressPos, pos, 12); return; }   // off a roof / falling
     // Just spawned: turn to face the way first (up to 1.2 s), then walk - no walking off backwards or sideways.
     if (b->spawnAt && t - b->spawnAt < 1200 && fabsf(wrap_pi(atan2f(aim[0] - pos[0], aim[2] - pos[2]) - soldier_yaw(soldier))) > 0.5f) { b->fwd = 0; b->strafe = 0; }
     // Walking: keep off a wall at the side (1 m rays at chest height, 45 degrees off the way it goes, every 100 ms) -
@@ -1621,9 +1730,13 @@ static void bot_think(int i)
     // day: the sideways push stopped the sprint (sprint needs strafe under 0.35) and the tester saw slow, hesitant bots. Bunching
     // is now handled where routes are picked: different learned routes per bot, busy ones cost more.)
     if (hold) { b->why = "waiting for a route"; b->fwd = 0; b->strafe = 0; b->turn = 0; b->progressAt = t; memcpy(b->progressPos, pos, 12); }   // (no staring at the target through a wall)
-    if (b->targetFlag >= 0 && dist2d(pos, b->target) < 1.5f) b->fwd = 0;   // holding the spot
+    if (b->targetFlag >= 0 && dist2d(pos, b->target) < 1.5f && fabsf(pos[1] - b->target[1]) < 1.3f && b->wp >= b->npts) b->fwd = 0;   // holding the spot
     camp_hold(i, b, soldier, pos);
     combat_tick(i, b, soldier, team);   // [combat.inc hook]
+    if (!assisting && ammo_trip(i,b,soldier,team,t)) {
+        b->progressAt = b->idleAt = b->progAt = t;
+        memcpy(b->progressPos,pos,12); return;
+    }
     movement_tick(i, b, soldier, aim);   // vault / jump low obstacles, sprint on long runs
 
     // Scraping along a wall: walking (forward held, not fighting, not vaulting) but under 1.4 m/s for a second - the bot
@@ -1722,7 +1835,9 @@ static void bot_think(int i)
                 // Second time here: jump / vault at it whatever the height test said (fences and gates it misjudged:
                 // "they can just turn around or vault or jump"), and look for an opening - the clear way (knee and
                 // chest rays 4 m, ground at the end) nearest the way it wants to go.
-                movement_force_vault(i, b, t);
+                float head[3]={pos[0],pos[1]+1.65f,pos[2]};
+                float high[3]={head[0]+sinf(yaw)*1.8f,head[1],head[2]+cosf(yaw)*1.8f};
+                if (!ray_cast(head,high,NULL,NULL)) movement_force_vault(i, b, t);
                 float want = atan2f(aim[0] - pos[0], aim[2] - pos[2]), bestA = 9, gap[3];
                 for (int k = 0; k < 16; k++) {
                     float a = k * 0.3927f, dx = sinf(a), dz = cosf(a), ok = 1;
@@ -2008,6 +2123,6 @@ static int brain_buttons(void *pp, unsigned *buttons, float *pitch, float *roll,
 {
     void *player = FIELD(pp, OFF_PP_PLAYER, void *);
     for (int i = 0; i < MAX_BOTS; i++)
-        if (g_bot[i].player == player) { *buttons = g_bot[i].buttons; if (g_jumpUsed[i] == 1 && now_ms() < g_mx[i].vaultUntil) *buttons &= ~BTN_JUMP; *pitch = g_bot[i].pitch; *roll = g_bot[i].roll; *yaw = g_bot[i].yawIn; *thr = g_bot[i].throttleIn; return g_bot[i].inVehicle && g_bot[i].heliPilot ? 2 : 1; }
+        if (g_bot[i].player == player) { *buttons = g_bot[i].buttons; if (g_bot[i].boardReleaseUntil && now_ms() < g_bot[i].boardReleaseUntil) *buttons |= BTN_BOARD_RELEASE; if (g_jumpUsed[i] == 1 && now_ms() < g_mx[i].vaultUntil) *buttons &= ~BTN_JUMP; *pitch = g_bot[i].pitch; *roll = g_bot[i].roll; *yaw = g_bot[i].yawIn; *thr = g_bot[i].throttleIn; return g_bot[i].inVehicle && g_bot[i].heliPilot ? 2 : 1; }
     return 0;
 }

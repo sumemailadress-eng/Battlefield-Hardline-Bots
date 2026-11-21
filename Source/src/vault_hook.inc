@@ -19,6 +19,14 @@
 #define OFF_SOLDIER_CPE 0x70        // CharacterPhysicsEntity*
 #define VT_CPE          0x280a510   // its vtable (checked before every use)
 typedef void (*SetVel_t)(void *, float *);
+static int character_set_velocity(void *soldier, float *v4)
+{
+    char *cpe = FIELD(soldier, OFF_SOLDIER_CPE, char *);
+    if (!cpe || IsBadReadPtr(cpe, 0x150) || FIELD(cpe, 0, uintptr_t) != H->image + VT_CPE ||
+        !isfinite(v4[0]) || !isfinite(v4[1]) || !isfinite(v4[2])) return 0;
+    ((SetVel_t)(H->image + RVA_CHAR_SET_VELOCITY))(cpe, v4);
+    return 1;
+}
 static int g_vaultMove = 1;
 static unsigned g_vhCarries, g_vhKept, g_vhRetried, g_vhGaveUp, g_vhNoEntity, g_vhFaults;
 static void extern_vault_window(ULONGLONG until) { (void)until; }
@@ -67,9 +75,7 @@ static void vault_bot_tick(int i, ULONGLONG t)
         __declspec(align(16)) float v4[4] = { (q[0] - p[0]) / 0.12f, (q[1] - p[1]) / 0.12f, (q[2] - p[2]) / 0.12f, 0 };   // (the setter reads it with movaps: unaligned, every call faulted - 473 of 473, 2026-11-05)
         float vm = sqrtf(v4[0] * v4[0] + v4[1] * v4[1] + v4[2] * v4[2]);
         if (vm > 9) { v4[0] *= 9 / vm; v4[1] *= 9 / vm; v4[2] *= 9 / vm; }
-        char *cpe = FIELD(s, OFF_SOLDIER_CPE, char *);
-        if (!cpe || IsBadReadPtr(cpe, 0x150) || FIELD(cpe, 0, uintptr_t) != H->image + VT_CPE) { g_vhNoEntity++; g_vs[i].moving = 0; return; }
-        if (isfinite(v4[0]) && isfinite(v4[1]) && isfinite(v4[2])) ((SetVel_t)(H->image + RVA_CHAR_SET_VELOCITY))(cpe, v4);
+        if (!character_set_velocity(s, v4)) { g_vhNoEntity++; g_vs[i].moving = 0; return; }
         if (m->vaultUntil < t + 200) m->vaultUntil = t + 200;   // (movement_tick holds forward through it, and judges it after)
         if (el >= VAULT_CARRY_MS) { g_vs[i].moving = 2; g_vs[i].checkAt = t + 300; }
         return;

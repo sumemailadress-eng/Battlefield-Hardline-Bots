@@ -283,14 +283,13 @@ static int drop_descent(int i, Bot *b, void *soldier, const float *pos, ULONGLON
         H->log("airlift: %s landed %.1f m from drop point for flag %d", (char *)b->player + OFF_PLAYER_NAME, dist2d(pos,r->aim), r->flag);
         r->until = 0; g_airAt[i] = 0; return 0;
     }
-    b->action = 0;
+    parachute_fall(i, b, soldier, pos, t, r->aim);
     b->why = "parachuting to flag"; b->strafe = 0; b->fwd = dist2d(pos,r->aim) > 3 ? 1.0f : 0.0f;
     b->turn = turn_input(soldier_yaw(soldier),atan2f(r->aim[0]-pos[0],r->aim[2]-pos[2]),2);
-    if (below > 4 && (t / 250) % 2 == 0) { b->buttons |= BTN_CHUTE | BTN_JUMP; b->action = PP_ACT_JUMP; }
     return 1;
 }
 static int gun_seat_side(void *v, int prev);   // gunner_heli.inc
-typedef struct HeliCtl { int detourFlag, detourSide; float detour[3]; ULONGLONG courseAt, detourUntil; int roofOrder; ULONGLONG roofCheckAt; int orbit, orbitSide; ULONGLONG orbitAt; ULONGLONG breakUntil, gndAt, obsAt, scanAt; int gndHit, obsBlocked; float gndY, obsTop; void *tgt; float rateYaw, yawRate; ULONGLONG rateAt; float sign[3], acc[3], prev[3]; ULONGLONG winAt, lastAt; float lastY, vy, lastX, lastZ, vx, vz; int flips[3]; } HeliCtl;
+typedef struct HeliCtl { int pivot, detourFlag, detourSide; float detour[3]; ULONGLONG courseAt, detourUntil; int roofOrder; ULONGLONG roofCheckAt; int orbit, orbitSide; ULONGLONG orbitAt; ULONGLONG breakUntil, gndAt, obsAt, scanAt; int gndHit, obsBlocked; float gndY, obsTop; void *tgt; float rateYaw, yawRate; ULONGLONG rateAt; float sign[3], acc[3], prev[3]; ULONGLONG winAt, lastAt; float lastY, vy, lastX, lastZ, vx, vz; int flips[3]; } HeliCtl;
 static HeliCtl g_hctl[MAX_BOTS];
 static int flight_lane_clear(const float *p, float yaw, float distance)
 {
@@ -308,10 +307,10 @@ static int flight_lane_clear(const float *p, float yaw, float distance)
 static int transport_detour(HeliCtl *c, const float *p, float *aim, int flag, ULONGLONG t)
 {
     float dist = dist2d(p, aim);
-    if (flag != c->detourFlag || dist < 14 || p[1] < aim[1] + 10) {
+    if (flag != c->detourFlag || dist < 14) {
         c->detourUntil = 0; c->detourSide = 0; c->courseAt = 0; c->detourFlag = flag;
     }
-    if (dist < 14 || p[1] < aim[1]+10) return 0;
+    if (dist < 14) return 0;
     if (dist2d(p, c->detour) < 9) c->detourUntil = 0;
     if (t >= c->courseAt) {
         c->courseAt = t + 550;
@@ -444,8 +443,8 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
         want = fmaxf(aim[1] + 23, ground + 22);
     } else if (!attack && b->targetFlag >= 0 && dist < 70) want = fmaxf(aim[1] + 25, ground + 25);
     int airlift = dropping || (c->roofOrder && c->roofOrder == b->targetFlag + 1 && !attack);
-    int detour = airlift && transport_detour(c, p, aim, b->targetFlag, t);
-    if (detour) { dist = dist2d(p, aim); want = fmaxf(ground + 22, aim[1]); b->why = "flying around building"; }
+    int detour = t - h->startAt > 5000 && agl > 10 && (!firing || airlift) && transport_detour(c, p, aim, b->targetFlag, t);
+    if (detour) { dist = dist2d(p, aim); want = fmaxf(want, fmaxf(ground + 22, aim[1])); b->why = "flying around building"; }
     float dx = aim[0] - p[0], dz = aim[2] - p[2];
     if (dropping && dist < 38) {
         dx -= c->vx * 1.8f; dz -= c->vz * 1.8f;
@@ -455,7 +454,7 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
     // (the tester 2026-11-07: door guns only reach one side) A transport with gunners aboard circles a flag it doesn't hold, side on, 50 m out: nose along the circle, a little inward when outside
     // it and outward when inside. Lifting off, the tower check and the height loop are as before.
     int orbit = 0;
-    if (!dropping && !attack && b->targetFlag >= 0 && b->targetFlag < MAX_CPS && g_fi[b->targetFlag].ok && g_fi[b->targetFlag].owner != team && t - h->startAt > 8000 && dist < (c->orbit ? 150.0f : 110.0f)) {
+    if (!detour && !dropping && !attack && b->targetFlag >= 0 && b->targetFlag < MAX_CPS && g_fi[b->targetFlag].ok && g_fi[b->targetFlag].owner != team && t - h->startAt > 8000 && dist < (c->orbit ? 150.0f : 110.0f)) {
         if (t >= c->orbitAt) { c->orbitAt = t + 1000; c->orbitSide = gun_seat_side(v, c->orbitSide); }
         if (c->orbitSide) {
             float off = 1.5708f + fmaxf(-0.7f, fminf(0.5f, (50.0f - dist) * 0.02f));
@@ -475,12 +474,12 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
         // looked along; a helicopter sliding sideways or turning met the building beside it) also 25 degrees either side
         // of the nose and along the way it is actually moving
         float top = c->obsTop, sp = sqrtf(c->vx * c->vx + c->vz * c->vz);
-        float course = airlift ? atan2f(aim[0] - p[0], aim[2] - p[2]) : yaw;
+        float course = airlift || detour ? atan2f(aim[0] - p[0], aim[2] - p[2]) : yaw;
         float dirs[4] = { course, course + 0.45f, course - 0.45f, sp > 3 ? atan2f(c->vx, c->vz) : course };
         if (t >= c->obsAt) { c->obsAt = t + 200; top = -1e9f;   // (lag fix 0.3.1: up to 24 rays a look, 5 looks a second)
         for (int k = 0; k < 12; k++) {
             float hx = sinf(dirs[k / 3]), hz = cosf(dirs[k / 3]), len = k / 3 == 3 ? fmaxf(60, sp * 5) : 80;
-            if (airlift) {
+            if (airlift || detour) {
                 float braking = sp * sp / 7.0f;
                 len = k / 3 == 3 ? fminf(len, 8 + braking) : fminf(len, fmaxf(8, dist2d(p, aim) - 10));
                 if (detour && k/3 != 3) len = fminf(len, 20);
@@ -519,7 +518,7 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
         float ax = dx*gain - c->vx, az = dz*gain - c->vz;
         tiltWant = fmaxf(-0.33f, fminf(0.30f, -(ax*sinf(yaw) + az*cosf(yaw))*0.07f));
         hoverRoll = fmaxf(-0.28f, fminf(0.28f, -(ax*cosf(yaw) - az*sinf(yaw))*0.07f));
-        if (length < 18) yawErr = 0;
+        if (dropping && !detour && length < 12) yawErr = 0;
     }
     // (the tester 2026-10-29: "helicopters crashed all around - they should go up vertically first") straight up off the pad
     // until 20 m clear of the ground (and near the cruise height) - no nose-down before that
@@ -535,15 +534,29 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
     if (holdLevel) tiltWant = fmaxf(tiltWant, 0.02f);
     float rollWant = !holdLevel && fabsf(yawErr) > 0.3f ? (yawErr > 0 ? 0.12f : -0.12f) : 0;
     if (hover && !holdLevel && !(blockedAhead && want > p[1] + 3)) rollWant = hoverRoll;
+    // Turn with yaw while braking horizontal drift. Hysteresis keeps the nose steady near a tower corner.
+    if (detour || (!orbit && !firing && dist > 18)) {
+        if (fabsf(yawErr) > 0.95f) c->pivot = 1;
+        if (fabsf(yawErr) < 0.32f) c->pivot = 0;
+    } else c->pivot = 0;
+    if (c->pivot && agl > 8 && t - h->startAt > 5000) {
+        float forward = c->vx*sinf(yaw) + c->vz*cosf(yaw);
+        float lateral = c->vx*cosf(yaw) - c->vz*sinf(yaw);
+        tiltWant = fmaxf(-0.20f, fminf(0.22f, forward*0.05f));
+        rollWant = fmaxf(-0.18f, fminf(0.18f, lateral*0.05f));
+        b->why = "yawing onto flight path";
+    }
     int recovering = airlift && (fabsf(roll) > 0.50f || fabsf(pitch) > 0.65f || c->vy < -11);
     if (recovering) { tiltWant = rollWant = yawErr = 0; }
-    float yawRate = wrap_pi(yaw - c->prev[0]);   // (per frame - damping: AltBotMod's yaw PID)
-    float u[3] = { fmaxf(-1, fminf(1, yawErr * 1.5f - yawRate * 2.0f)), fmaxf(-1, fminf(1, (tiltWant - pitch) * 4.0f)), fmaxf(-1, fminf(1, (rollWant - roll) * 4.0f)) };
+    // Yaw uses the measured angular rate in radians per second below.
+    float u[3] = { 0, fmaxf(-1, fminf(1, (tiltWant - pitch) * 4.0f)), fmaxf(-1, fminf(1, (rollWant - roll) * 4.0f)) };
     // limits: gentle inputs; spinning or tipped over: no more yaw until it settles
     if (!c->rateAt) { c->rateAt = t; c->rateYaw = yaw; }
     else if (t - c->rateAt >= 50) { c->yawRate = wrap_pi(yaw - c->rateYaw) / ((t - c->rateAt) / 1000.0f); c->rateYaw = yaw; c->rateAt = t; }
-    u[0] = fmaxf(-0.6f, fminf(0.6f, u[0])); u[1] = fmaxf(-0.6f, fminf(0.6f, u[1])); u[2] = fmaxf(-0.25f, fminf(0.25f, u[2]));
-    if (holdLevel || fabsf(c->yawRate) > 1.5f || fabsf(roll) > 0.6f || fabsf(pitch) > 0.9f) u[0] = 0;
+    u[1] = fmaxf(-0.6f, fminf(0.6f, u[1])); u[2] = fmaxf(-0.25f, fminf(0.25f, u[2]));
+    float desiredRate = fmaxf(-0.85f, fminf(0.85f, yawErr * 1.45f));
+    u[0] = fmaxf(-0.65f, fminf(0.65f, (desiredRate - c->yawRate) * 0.85f));
+    if (recovering || t - h->startAt < 5000 || agl < 6 || fabsf(roll) > 0.6f || fabsf(pitch) > 0.9f) u[0] = 0;
     float now3[3] = { yaw, pitch, roll };
     // self-check: input u (wanting the angle to go up when positive) against how the angle went
     for (int k = 0; k < 3; k++) {
@@ -566,11 +579,12 @@ static void heli_fly(int i, Bot *b, void *v, int team, ULONGLONG t, Heli *h)
     b->pitch = c->sign[1] * u[1];
     b->roll = c->sign[2] * u[2];
     float dy = want - p[1];
-    float thr = t - h->startAt < 4000 ? 1 : fmaxf(0, fminf(1, 0.45f + dy * 0.08f - c->vy * 0.25f));
+    float climbRate = fmaxf(-4, fminf(8, dy * 0.42f));
+    float thr = t - h->startAt < 4000 ? 1 : fmaxf(0, fminf(1, 0.45f + (climbRate - c->vy) * 0.15f));
     b->fwd = thr;   // EIAThrottle (collective)
     b->heliPilot = 1;
     if (climbFirst) b->fwd = 1;   /* (full collective until clear) */
-    if (dy < -20 && c->vy > -3) b->fwd = -0.5f;   // far too high: brake (down)
+    if (dy < -20 && c->vy > 2) b->fwd = -0.25f;   // far too high: brake (down)
     if (recovering && c->vy < -3) b->fwd = 1;
     // Pilot weapons (simple, replacing the patch's rocket picker - the tester: "attack helis don't shoot rockets"): nose roughly on
     // the target (0.3 rad) - fire in bursts, 1.1 s on / 0.4 s off; the weapon swaps every 6 s between slot 1 (guns) and

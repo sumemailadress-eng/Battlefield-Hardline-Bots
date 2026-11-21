@@ -1,10 +1,23 @@
 ThugBot patch notes
 ===================
 
-Vehicle updates since V0.4.3
-----------------------------
+Downtown navigation updates since V0.4.3
+----------------------------------------
+- Infantry follow the first reachable waypoint into doors and around corners. A grid path must
+  reach a saved foot route before the bot can follow it. Floor height counts when joining routes.
+- Infantry spread attack and defense assignments among flags, including threatened friendly flags.
+- Passengers approach a door, face the cabin and release the interaction keys after getting in.
+  Drivers can advance from the outgoing lane and change road entry if they start circling.
+- Helicopters can turn with yaw while slowing their drift around buildings. Falling bots request
+  a parachute before other orders. Server-side braking slows a fall if deployment misses.
 - Drivers follow road detours through the final approach, slow for the tightest upcoming turn,
   and check the space behind them before reversing. A blocked approach can trigger a new route.
+- On ramps, cars and infantry compare their position with the slope of the outgoing lane.
+  Infantry check for nearby open doorways and line up before using a closed door.
+- Ammo carriers can leave cans near flag areas and along foot routes. Teammates between
+  fights use recent firing activity to choose a nearby friendly drop, then resume their objective.
+- The launcher saves each instance's ticket multiplier and server type for its next start.
+  The Unranked option enables lower targets. Server cards show team scores when available.
 - Loaded transports can prioritize an elevated enemy flag and fly around nearby buildings.
   Pilots check the landing surface and slow over it before calling for a passenger drop.
   Ledge riders deploy first. At a high objective a seated rider can also parachute to the flag.

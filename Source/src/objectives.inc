@@ -17,7 +17,18 @@ typedef struct FlagInfo { int ok, owner; float pos[3], radius; int enemies[3], f
 // In the capture area: within scale x its radius across and on its floor (earlier development code)
 static int in_area(const float *pos, const FlagInfo *fi, float scale) { return dist2d(pos, fi->pos) < fi->radius * scale && fabsf(pos[1] - fi->pos[1]) < 8; }
 static FlagInfo g_fi[MAX_CPS];
+static int supply_flag_site(const float *pos)
+{
+    for (int f = 0; f < g_cpCount && f < MAX_CPS; f++) {
+        if (!g_fi[f].ok || !flag_takeable(f) || fabsf(pos[1]-g_fi[f].pos[1]) > 2.7f) continue;
+        if (dist2d(pos,g_fi[f].pos) <= g_fi[f].radius + 10) return f;
+    }
+    return -1;
+}
 static unsigned g_fiFrame = ~0u;
+static int g_flagRole[MAX_BOTS], g_flagVoted[MAX_BOTS], g_eligibleTeam[3];
+static unsigned g_defendUntilFlag[MAX_BOTS];
+static ULONGLONG g_defendChooseAt[MAX_BOTS];
 static void *g_flagGroundCp[MAX_CPS];
 static int g_flagRaw[MAX_CPS], g_flagStable[MAX_CPS], g_flagStableSet[MAX_CPS];
 static ULONGLONG g_flagRawAt[MAX_CPS];
@@ -59,7 +70,7 @@ static void flags_survey(void)
         for (int j = 0; j < g_playerCount; j++) {
             int t = FIELD(g_players[j], OFF_PLAYER_TEAM, int);
             void *s = bot_soldier(g_players[j]);
-            if (!s || t < 1 || t > 2 || dist2d(soldier_pos(s), fi->pos) > 45) continue;
+            if (!s || t < 1 || t > 2 || dist2d(soldier_pos(s), fi->pos) > 45 || fabsf(soldier_pos(s)[1]-fi->pos[1]) > 9) continue;
             fi->friends[t]++;                 // per team: players of team t within 45 m
         }
         fi->enemies[1] = fi->friends[2];
@@ -70,9 +81,31 @@ static void flags_survey(void)
             g_flagOwnerSeen[f] = fi->owner;
         }
     }
+    int owned[3] = {0}, total = 0, roster[3] = {0};
+    memset(g_eligibleTeam, 0, sizeof g_eligibleTeam);
+    for (int f = 0; f < g_cpCount; f++) if (g_fi[f].ok) {
+        total++; if (g_fi[f].owner == 1 || g_fi[f].owner == 2) owned[g_fi[f].owner]++;
+    }
+    for (int i=0; i<H->botCount; i++) if (H->bots[i]) {
+        int team = FIELD(H->bots[i], OFF_PLAYER_TEAM, int);
+        if (team == 1 || team == 2) g_eligibleTeam[team]++;
+    }
     for (int i = 0; i < H->botCount; i++) {
-        int f = g_bot[i].targetFlag, t = FIELD(H->bots[i], OFF_PLAYER_TEAM, int);
-        if (f >= 0 && f < g_cpCount && t >= 1 && t <= 2 && bot_soldier(H->bots[i])) g_fi[f].attackers[t]++;
+        g_flagRole[i] = 0; g_flagVoted[i] = -1;
+        if (!H->bots[i]) continue;
+        int team = FIELD(H->bots[i], OFF_PLAYER_TEAM, int);
+        if (team != 1 && team != 2) continue;
+        int rank = roster[team]++, count = g_eligibleTeam[team];
+        int hostile = total-owned[team];
+        float share = g_set.defendShare;
+        if (share > 0 && owned[team] && hostile > 0 && count >= 12)
+            share = fmaxf(share, fminf(0.55f, 1.0f - (10.0f * hostile)/count));
+        int guards = (int)(count*share + 0.5f);
+        g_flagRole[i] = ((rank+1)*guards + count/2)/count > (rank*guards + count/2)/count;
+        int f = g_bot[i].targetFlag;
+        if (f >= 0 && f < g_cpCount && bot_soldier(H->bots[i]) && !g_bot[i].inVehicle) {
+            g_fi[f].attackers[team]++; g_flagVoted[i] = f;
+        }
     }
 }
 
@@ -156,7 +189,16 @@ static int team_size(int team)
     return n ? n : 1;
 }
 
-static int is_defender(Bot *b) { return (int)((b->seed >> 3) % 100) < (int)(g_set.defendShare * 100); }
+static int is_defender(Bot *b) { return g_flagRole[b-g_bot]; }
+
+static void flag_vote(int i, int team, int f)
+{
+    if (g_bot[i].inVehicle || f == g_flagVoted[i] || team < 1 || team > 2) return;
+    int old = g_flagVoted[i];
+    if (old >= 0 && old < g_cpCount && g_fi[old].attackers[team] > 0) g_fi[old].attackers[team]--;
+    g_flagVoted[i] = f;
+    if (f >= 0 && f < g_cpCount) g_fi[f].attackers[team]++;
+}
 
 // Inside the capture area: a new spot within it every few seconds (milling, so a bot doesn't stand in one place).
 static void flag_mill(Bot *b, int f, ULONGLONG t, float spread)
@@ -166,10 +208,11 @@ static void flag_mill(Bot *b, int f, ULONGLONG t, float spread)
         // Spread over the capture area (the tester, The Block: "a lot of bots around each other at a playground" - every bot
         // milled within 6 m of the centre). Best of 8 spots up to 12 m out: furthest from other players and the spots
         // teammates already picked, a little bonus next to a wall / object (cover).
-        float rmax = fminf(fi->radius * spread, 12.0f), best[3], bestScore = -1e9f;
+        float rmax = fminf(fi->radius * spread, 20.0f), best[3], bestScore = -1e9f;
         memcpy(best, fi->pos, 12);
         for (int k = 0; k < 8; k++) {
-            unsigned rnd = b->seed * 2654435761u ^ (unsigned)(t / 7) * 40503u ^ (unsigned)k * 97u;
+            unsigned rnd = b->seed * 2654435761u ^ (unsigned)(t / 7) * 40503u ^ (unsigned)k * 2246822519u;
+            rnd ^= rnd >> 16; rnd *= 0x7feb352du; rnd ^= rnd >> 15;
             float r = rmax * sqrtf((float)(rnd % 1000) / 1000.0f), a = (float)((rnd >> 10) % 628) / 100.0f;
             float pt[3] = { fi->pos[0] + r * sinf(a), fi->pos[1], fi->pos[2] + r * cosf(a) };
             if (g_nav && !g_navBuilding && !nav_snap(g_nav, pt[0], pt[1], pt[2], pt)) continue;
@@ -260,19 +303,29 @@ static int objective_flags(int i, Bot *b, int team, const float *pos)
     int owned = 0, total = 0;
     for (int f = 0; f < g_cpCount; f++) if (g_fi[f].ok) { total++; owned += g_fi[f].owner == team; }
     if (!total) return 0;
-    if (ordered_flag(b, team, pos, t)) return 1;
+    if (ordered_flag(b, team, pos, t)) { flag_vote(i,team,b->targetFlag); return 1; }
 
     // Defend: the owned flag under most threat (ties: nearest).
-    if (owned && owned < total && is_defender(b)) {
+    int takingHere = 0;
+    for (int f=0; f<g_cpCount; f++) if (g_fi[f].ok && g_fi[f].owner != team && in_area(pos,&g_fi[f],1.0f)) takingHere = 1;
+    if (owned && (owned == total || (is_defender(b) && !takingHere))) {
         int best = -1; float bestScore = 1e9f;
         for (int f = 0; f < g_cpCount; f++) {
             if (!g_fi[f].ok || g_fi[f].owner != team) continue;
-            float score = dist2d(pos, g_fi[f].pos) * 0.2f - g_fi[f].enemies[team] * 40.0f + (f == b->targetFlag ? -15 : 0);
+            int assigned = g_fi[f].attackers[team] - (g_flagVoted[i] == f);
+            float threat = fminf(4.0f, (float)g_fi[f].enemies[team]);
+            float score = fminf(350,dist2d(pos,g_fi[f].pos))*0.13f + assigned*34.0f - threat*16.0f;
+            if (assigned == 0) score -= 48;
+            if (g_defendUntilFlag[i] == (unsigned)(f+1) && t < g_defendChooseAt[i]) score -= 48;
             if (score < bestScore) { bestScore = score; best = f; }
         }
         if (best >= 0 && b == g_stTraceBot && g_stTraceFrames > 0) H->log("steertrace: defend -> flag %d (owned %d of %d)", best, owned, total);
         if (best >= 0) {
-            if (dist2d(pos, g_fi[best].pos) < g_fi[best].radius * 0.8f) flag_mill(b, best, t, 0.6f);
+            if (g_defendUntilFlag[i] != (unsigned)(best+1) || t >= g_defendChooseAt[i]) {
+                g_defendUntilFlag[i] = best+1; g_defendChooseAt[i] = t+14000+(b->seed%8000);
+            }
+            flag_vote(i, team, best);
+            if (in_area(pos, &g_fi[best], 0.8f)) flag_mill(b, best, t, 0.6f);
             else { if (b->targetFlag != best) b->npts = 0; b->targetFlag = best; memcpy(b->target, g_fi[best].pos, 12); }
             return 1;
         }
@@ -293,9 +346,10 @@ static int objective_flags(int i, Bot *b, int team, const float *pos)
             // in several places (spawn, the watchdog, hunting, cover); with it the bot's own vote on its old flag counted
             // against that flag, so it flipped between two flags every frame (Downtown, 63 bots: 8 flips a second).
             int mine = b->attackFlag == f + 1;
-            int others = fi->attackers[team] - (b->targetFlag == f);
+            int others = fi->attackers[team] - (g_flagVoted[i] == f);
             float score = dist2d(pos, fi->pos) + (float)((b->seed * 2654435761u + f * 40503u) % 40)
-                        + (others >= share ? 35.0f * (others - share + 1) : 0)
+                        + others * 11.0f + (others >= share ? 60.0f * (others - share + 1) : 0)
+                        - (others == 0 ? 70.0f : 0)
                         + (fi->owner == 0 ? -25.0f : 0)
                         + fi->enemies[team] * 6.0f
                         + (target_dead(fi->pos) ? 400.0f : 0);   // no route there right now (a rooftop flag only an elevator reaches): the others first
@@ -308,7 +362,8 @@ static int objective_flags(int i, Bot *b, int team, const float *pos)
         // Committed: the flag it chose stays for 45 - 60 s, until it is ours (then it isn't "cur" any more), the watchdog gives up on
         // it or no route there exists. It used to re-vote every 4 - 6 s on head-counts that changed as teammates re-voted.
         { ULONGLONG sp = b->spawnAt; if (sp && t - sp < 1500) b->attackChooseAt = 0; }   // (respawned: chooses from where it is now)
-        if (cur >= 0 && t < b->attackChooseAt && !target_dead(g_fi[cur].pos)) best = cur;
+        if (cur >= 0 && t < b->attackChooseAt && !target_dead(g_fi[cur].pos) &&
+            (best < 0 || best == cur || g_fi[cur].attackers[team] <= g_fi[best].attackers[team] + 3)) best = cur;
         else if (best >= 0) b->attackChooseAt = t + 45000 + (b->seed % 15000);
         // (earlier development code) in its capture area and not ours yet: it stays, whatever another flag scores
         if (cur >= 0 && in_area(pos, &g_fi[cur], 1.0f) && g_fi[cur].owner != team) best = cur;
@@ -317,7 +372,8 @@ static int objective_flags(int i, Bot *b, int team, const float *pos)
             if (ld >= 0 && ld != i && g_bot[ld].attackFlag > 0) {
                 int lf = g_bot[ld].attackFlag - 1;
                 int taking = cur >= 0 && in_area(pos, &g_fi[cur], 1.0f) && g_fi[cur].owner != team;
-                if (lf < g_cpCount && g_fi[lf].ok && g_fi[lf].owner != team && !taking && lf != best) {
+                if (lf < g_cpCount && g_fi[lf].ok && g_fi[lf].owner != team && !taking && lf != best &&
+                    g_fi[lf].attackers[team] < share && (best < 0 || g_fi[lf].attackers[team] <= g_fi[best].attackers[team]+2)) {
                     static unsigned sl; if (sl++ < 40) H->log("squad: %s follows its squad leader %s to flag %d (had flag %d)", (char *)b->player + OFF_PLAYER_NAME, (char *)H->bots[ld] + OFF_PLAYER_NAME, lf, best);
                     best = lf; b->attackChooseAt = g_bot[ld].attackChooseAt;
                 }
@@ -337,7 +393,8 @@ static int objective_flags(int i, Bot *b, int team, const float *pos)
             H->log("%s", line);
         }
         if (best >= 0) {
-            if (dist2d(pos, g_fi[best].pos) < g_fi[best].radius * 0.6f) flag_mill(b, best, t, 0.45f);   // capturing: stay in
+            flag_vote(i, team, best);
+            if (in_area(pos, &g_fi[best], 0.6f)) flag_mill(b, best, t, 0.45f);   // capturing: stay in
             else { if (b->targetFlag != best) b->npts = 0; b->targetFlag = best; memcpy(b->target, g_fi[best].pos, 12); flank_target(b, best, pos); }
             return 1;
         }

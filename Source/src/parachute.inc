@@ -8,7 +8,7 @@
 //   it, nothing in the way at chest height. It walks there and keeps going over it; the falling rule then opens the
 //   chute and it steers towards its target on the way down.
 
-typedef struct Chute { ULONGLONG lookAt, until, jumpAt; float edge[3], dir[2]; int active, glass; float fallTop; int falling; ULONGLONG leftAt; } Chute;
+typedef struct Chute { ULONGLONG lookAt, until, jumpAt; float edge[3], dir[2]; int active, glass; float fallTop; int falling, slowed, assisted, samples; void *soldier; ULONGLONG slowAt, pressAt; } Chute;
 static Chute g_chute[MAX_BOTS];
 static unsigned g_chuteJumps, g_chuteOpens;
 
@@ -80,51 +80,63 @@ static float air_below(const float *p)
     return ray_cast(a, b, h, NULL) ? fmaxf(p[1] - h[1], 0) : 120;
 }
 
-// Every frame for a live bot on foot, after steering. Returns 1 when it took over the inputs.
+static int character_set_velocity(void *soldier, float *v4);
+
+// Runs before on-foot orders, combat and vehicle pickup can take the frame.
+static int parachute_fall(int i, Bot *b, void *soldier, const float *pos, ULONGLONG t, const float *aim)
+{
+    Chute *c = &g_chute[i];
+    if (c->soldier != soldier) { memset(c, 0, sizeof *c); c->soldier = soldier; }
+    float vy = ((const float *)((char *)soldier + OFF_SOLDIER_VELOCITY))[1];
+    int ejected = g_airAt[i] && t - g_airAt[i] < 6000;
+    if (!c->falling && !ejected && vy >= -3.0f) return 0;
+    float air = air_below(pos);
+    if (c->falling && air < 1.6f && vy > -2.0f) {
+        H->log("chute: %s reached ground after %.1f m in %.1f s, slow descent observed %d, braking assist %d", (char *)b->player + OFF_PLAYER_NAME,
+               c->fallTop - pos[1], (t - c->jumpAt) / 1000.0, c->slowed, c->assisted);
+        c->falling = 0; g_airAt[i] = 0; return 0;
+    }
+    if (!c->falling) {
+        if (air < (ejected ? 4.0f : 5.5f)) return 0;
+        c->falling = 1; c->active = 0; c->fallTop = pos[1]; c->jumpAt = t; c->slowed = 0; c->slowAt = 0; c->pressAt = 0; c->samples = c->assisted = 0;
+        g_chuteOpens++;
+        H->log("chute: %s requesting deployment %.1f m above ground%s", (char *)b->player + OFF_PLAYER_NAME, air, ejected ? " on aircraft exit" : "");
+    }
+    if (t - c->jumpAt >= (ULONGLONG)(c->samples + 1)*1200 && c->samples < 5) {
+        c->samples++;
+        H->log("chute: %s %.1f s into fall, %.1f m down, vertical speed %.1f m/s", (char *)b->player + OFF_PLAYER_NAME,
+               (t-c->jumpAt)/1000.0, c->fallTop-pos[1], vy);
+    }
+    if (vy < -1.0f && vy > -8.0f && air > 2.0f) {
+        if (!c->slowAt) c->slowAt = t;
+        if (t - c->slowAt >= 900 && c->fallTop - pos[1] > 6) c->slowed = 1;
+    } else c->slowAt = 0;
+    b->action = 0;
+    // Release the ledge-jump input first. Once deployed, pressing the toggle again can cut the canopy.
+    if (!c->pressAt && t - c->jumpAt >= 90) c->pressAt = t;
+    else if (c->pressAt && t - c->pressAt > 1250 && vy < -10 && !c->slowAt) c->pressAt = t;
+    if (c->pressAt && t - c->pressAt < 210) {
+        b->buttons |= BTN_CHUTE | BTN_JUMP; b->action = PP_ACT_JUMP;
+    } else b->buttons |= BTN_CHUTE_RELEASE;
+    // Some server pseudo-players continue in free fall after a deploy press. Keep their
+    // horizontal momentum and use the character controller to arrest the descent.
+    if (c->pressAt && t-c->jumpAt > 360 && vy < (c->assisted ? -5.5f : -12.0f)) {
+        const float *v = (const float *)((char *)soldier + OFF_SOLDIER_VELOCITY);
+        __declspec(align(16)) float capped[4] = {v[0], -5.0f, v[2], 0};
+        if (character_set_velocity(soldier, capped) && !c->assisted) {
+            c->assisted = 1;
+            H->log("chute: %s still descending at %.1f m/s after deploy, applying braking assist", (char *)b->player + OFF_PLAYER_NAME, vy);
+        }
+    }
+    b->fwd = c->slowed ? 0.45f : 0.15f; b->strafe = 0;
+    b->turn = turn_input(soldier_yaw(soldier), atan2f(aim[0] - pos[0], aim[2] - pos[2]), 2);
+    return 1;
+}
+
+// Choose and approach a ledge after the ground route has been updated.
 static int parachute_tick(int i, Bot *b, void *soldier, const float *pos, ULONGLONG t)
 {
     Chute *c = &g_chute[i];
-    const float *v = (const float *)((char *)soldier + OFF_SOLDIER_VELOCITY);
-    // falling: open the chute (and steer for the target while coming down)
-    // a fall that ended: how fast it came down (a chute: ~5 m/s, none: 20+), to see whether the chute opened
-    if (c->falling && v[1] > -1.5f) {
-        c->falling = 0;
-        static unsigned logged;
-        if (logged++ < 30) H->log("chute: %s landed - %.0f m down in %.1f s (%.1f m/s)", (char *)b->player + OFF_PLAYER_NAME, c->fallTop - pos[1], (t - c->jumpAt) / 1000.0, (c->fallTop - pos[1]) / fmaxf(0.1f, (t - c->jumpAt) / 1000.0f));
-    }
-    // (the tester 2026-11-07: "bot parachutes should deploy the instant they eject - so far they slam to the ground and die") Just out of a helicopter (bail, drop over a flag, off
-    // the ledge) with 5 m+ of air below: the parachute key from the first frame on foot, held 400 ms and then 250 ms of every 500, until it has come down 1.5 s slowly (a chute) or
-    // lands. Before, it waited for 7 m/s of fall with 10 m below: from a low helicopter that was too late.
-    if (g_airAt[i] && t - g_airAt[i] < 6000) {
-        float ab = air_below(pos);
-        if (ab > 5 && !(t - g_airAt[i] > 1500 && v[1] > -6.0f && c->falling)) {
-            if (!c->falling) { c->falling = 1; c->fallTop = pos[1]; c->jumpAt = t; static unsigned el; if (el++ < 40) H->log("chute: %s left the aircraft %.0f m up - parachute now", (char *)b->player + OFF_PLAYER_NAME, ab); }
-            unsigned long long since = t - c->jumpAt;
-            if (since < 400 || since % 500 < 250) { b->buttons |= BTN_CHUTE | BTN_JUMP; b->action = PP_ACT_JUMP; }
-            b->fwd = 1; b->strafe = 0;
-            b->turn = turn_input(soldier_yaw(soldier), atan2f(b->target[0] - pos[0], b->target[2] - pos[2]), 2.0f);
-            return 1;
-        }
-        if (ab <= 5) g_airAt[i] = 0;
-    }
-    // Off the edge it chose: the chute opens 1.5 s after leaving it (the tester: "parachute a second and a half after jumping
-    // out" - clear of the building first), sooner if the ground comes within 30 m.
-    if (c->active && v[1] < -2.5f && air_below(pos) > 10) { c->active = 0; c->leftAt = t; }
-    if (c->leftAt) {
-        if (air_below(pos) < 2 || t - c->leftAt > 30000) c->leftAt = 0;
-        else if (t - c->leftAt < 1500 && air_below(pos) > 30) { b->fwd = 1; b->strafe = 0; return 1; }   // (falling clear, still pushing away from the wall)
-    }
-    if (v[1] < -4 && air_below(pos) > 8) {
-        if (!c->falling) { c->falling = 1; c->fallTop = pos[1]; c->jumpAt = 0; }
-        // Jump and the parachute key, held 250 ms of every 700 (one-frame taps were missed: bots fell 120 m pressing
-        // jump every 600 ms). Logged once per fall.
-        if (!c->jumpAt || t - c->jumpAt > 5000) { c->jumpAt = t; if (g_chuteOpens++ < 30) H->log("chute: %s opens the parachute %.0f m up", (char *)b->player + OFF_PLAYER_NAME, air_below(pos)); }
-        if ((t - c->jumpAt) % 700 < 250) { b->buttons |= BTN_JUMP | BTN_CHUTE; b->action = PP_ACT_JUMP; }
-        b->fwd = 1; b->strafe = 0;
-        b->turn = turn_input(soldier_yaw(soldier), atan2f(b->target[0] - pos[0], b->target[2] - pos[2]), 2.0f);
-        c->active = 0;
-        return 1;
-    }
     // heading for an edge it picked
     if (c->active) {
         if (g_fight[i].state != CS_IDLE || b->enemy) { c->active = 0; return 0; }   // enemies first: no window-knifing in a fight
@@ -137,8 +149,9 @@ static int parachute_tick(int i, Bot *b, void *soldier, const float *pos, ULONGL
         float d = dist2d(pos, c->edge);
         float want = d > 1.0f ? atan2f(c->edge[0] - pos[0], c->edge[2] - pos[2]) : atan2f(c->dir[0], c->dir[1]);
         b->turn = turn_input(soldier_yaw(soldier), want, 3.0f);
-        b->fwd = 1; b->strafe = 0;
-        if (d < 2.0f) { b->buttons |= BTN_JUMP; b->action = PP_ACT_JUMP; }   // jump off rather than step (clears railings / sills)
+        float error = wrap_pi(want - soldier_yaw(soldier));
+        b->fwd = fmaxf(0, cosf(error)); b->strafe = g_strafeSign*sinf(error);
+        if (d < 2.0f && fabsf(error) < 0.65f) { b->buttons |= BTN_JUMP; b->action = PP_ACT_JUMP; }   // jump off rather than step (clears railings / sills)
         if (c->glass) {   // a window pane between it and the drop: knife it when it's in reach
             float a1[3] = { pos[0], pos[1] + 1.2f, pos[2] }, a2[3] = { pos[0] + c->dir[0] * 1.6f, pos[1] + 1.2f, pos[2] + c->dir[1] * 1.6f };
             if (ray_cast(a1, a2, NULL, NULL)) { b->buttons |= BTN_MELEE; if (((t / 400) & 1)) b->buttons |= BTN_FIRE; }
@@ -151,7 +164,8 @@ static int parachute_tick(int i, Bot *b, void *soldier, const float *pos, ULONGL
     c->lookAt = t + 2000;
     int pathLift = 0;   // the way down is an elevator ride: jumping is quicker
     for (int k = b->wp; k + 1 < b->npts; k++) if (b->path[k * 3 + 1] - b->path[(k + 1) * 3 + 1] > 15) pathLift = 1;
-    if (b->npts > 1 && drop < 25 && !pathLift) {
+    if (pathLift) return 0;
+    if (b->npts > 1 && drop < 25) {
         float len = 0;
         for (int k = b->wp; k + 1 < b->npts; k++) len += dist2d(&b->path[k * 3], &b->path[(k + 1) * 3]);
         if (len < side * 2.5f) return 0;   // a decent way down on foot
@@ -162,7 +176,7 @@ static int parachute_tick(int i, Bot *b, void *soldier, const float *pos, ULONGL
     for (int k = 0; k < g_jumpN; k++) {
         if (fabsf(g_jumps[k].p[1] - pos[1]) > 2.5f || edge_bad(g_jumps[k].p, t)) continue;
         float d = dist2d(pos, g_jumps[k].p);
-        if (d < 40 && d < best) { best = d; memcpy(c->edge, g_jumps[k].p, 12); c->dir[0] = g_jumps[k].dir[0]; c->dir[1] = g_jumps[k].dir[1]; c->glass = 1; found = 2; }
+        if (d < 40 && d < best && foot_connector(pos, g_jumps[k].p)) { best = d; memcpy(c->edge, g_jumps[k].p, 12); c->dir[0] = g_jumps[k].dir[0]; c->dir[1] = g_jumps[k].dir[1]; c->glass = 1; found = 2; }
     }
     for (int dI = 0; dI < 16 && found != 2; dI++) {
         float a = dI * 0.3927f, dx = sinf(a), dz = cosf(a);

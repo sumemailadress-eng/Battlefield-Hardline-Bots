@@ -63,7 +63,8 @@ static void live_snapshot(void)
         const Bot *b = &g_bot[i];
         if (!b->alive || !b->player || b->player != H->bots[i]) continue;
         int seat = -1;
-        void *vehicle = b->inVehicle ? player_vehicle(b->player, &seat) : NULL;
+        void *vehicle = player_in_vehicle(b->player);
+        if (vehicle) player_vehicle(b->player, &seat);  // Soldier-controlled passengers have no reported seat index.
         void *soldier = vehicle ? NULL : bot_soldier(b->player);
         const float *p = vehicle ? veh_pos(vehicle) : soldier ? soldier_pos(soldier) : NULL;
         if (!live_valid_point(p)) continue;

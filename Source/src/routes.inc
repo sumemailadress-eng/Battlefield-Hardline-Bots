@@ -124,7 +124,7 @@ static void routes_note_spawn(int team, const float *p)
     if (team < 1 || team > 2) return;
     for (int i = 0; i < g_spawnN; i++) {
         Spawn *s = &g_spawns[i];
-        if (s->team != team || dist2d(s->p, p) > 40) continue;
+        if (s->team != team || dist2d(s->p, p) > 40 || fabsf(s->p[1] - p[1]) > 3) continue;
         // a running mean, so the spot settles in the middle of where bots appear
         float w = 1.0f / (float)(s->seen < 50 ? s->seen + 1 : 50);
         for (int k = 0; k < 3; k++) s->p[k] += (p[k] - s->p[k]) * w;
@@ -273,6 +273,17 @@ static void routes_tick(void)
         }
     }
     if (n >= 2 && !partial) {
+        // Store under the requested pair even if the search succeeded backwards. Otherwise the
+        // stale forward record keeps the builder occupied retrying the same pair every second.
+        if (g_routeBuildReversed && !g_routeBuildHasVia) {
+            char name[40]; float q[3];
+            strcpy(name,g_routeBuildFrom); strcpy(g_routeBuildFrom,g_routeBuildTo); strcpy(g_routeBuildTo,name);
+            memcpy(q,g_routeBuildA,12); memcpy(g_routeBuildA,g_routeBuildB,12); memcpy(g_routeBuildB,q,12);
+            for (int k = 0; k < n/2; k++) {
+                float *a = pts+3*k, *b = pts+3*(n-1-k);
+                memcpy(q,a,12); memcpy(a,b,12); memcpy(b,q,12);
+            }
+        }
         center_path(pts, n, 1);
         int k = route_store(g_routeBuildFrom, g_routeBuildTo, g_routeBuildA, g_routeBuildB, pts, n);
         if (k < 0) { g_routesFull = 1; g_routeBuild = -1; H->log("routes: no room for more routes (%d) - building stops for this level", g_routeN); return; }
@@ -315,7 +326,7 @@ static int routes_pick(const float *pos, const float *target, float *path, int m
         if (r->n < 2 || r->fails >= 3) continue;
         for (int rev = 0; rev < 2; rev++) {
             const float *end = rev ? r->pts[0] : r->pts[r->n - 1];
-            if (dist2d(end, target) > 10) continue;
+            if (dist2d(end, target) > 10 || fabsf(end[1] - target[1]) > 3) continue;
             best = -1; bestCost = 1e9f;
             for (int k = 0; k < r->n; k++) {
                 const float *q = r->pts[rev ? r->n - 1 - k : k];
@@ -340,7 +351,7 @@ static int routes_pick(const float *pos, const float *target, float *path, int m
         if (m < 0) break;
         SRoute *r = &g_routes[cand[m].r];
         const float *join = r->pts[cand[m].rev ? r->n - 1 - cand[m].k : cand[m].k];
-        if (dist2d(pos, join) <= 2.5f || (g_nav && !g_navBuilding ? nav_direct_route(g_nav, ray_cast, pos, join) : dist2d(pos, join) < 6 && nav_segment_clear(ray_cast, pos, join)))
+        if (foot_connector(pos, join))
             { best = cand[m].r; bestK = cand[m].k; bestRev = cand[m].rev; }
         cand[m].r = -1;
     }
@@ -348,7 +359,7 @@ static int routes_pick(const float *pos, const float *target, float *path, int m
     SRoute *r = &g_routes[best];
     int n = 0;
     for (int k = bestK; k < r->n && n < maxPts; k++, n++) memcpy(&path[n * 3], r->pts[bestRev ? r->n - 1 - k : k], 12);
-    if (n < maxPts && dist2d(&path[(n - 1) * 3], target) > 1.5f) { memcpy(&path[n * 3], target, 12); n++; }
+    if (n < maxPts && dist2d(&path[(n - 1) * 3], target) > 1.5f && foot_connector(&path[(n - 1) * 3], target)) { memcpy(&path[n * 3], target, 12); n++; }
     *routeOut = best;
     g_routesUsed++;
     return n;
@@ -365,7 +376,7 @@ static int routes_far_join(const float *pos, const float *target, int *kOut, int
         if (r->n < 2 || r->fails >= 3) continue;
         for (int rev = 0; rev < 2; rev++) {
             const float *end = rev ? r->pts[0] : r->pts[r->n - 1];
-            if (dist2d(end, target) > 10) continue;
+            if (dist2d(end, target) > 10 || fabsf(end[1] - target[1]) > 3) continue;
             float rest = 0;
             for (int k = r->n - 1; k >= 0; k--) {   // from the end backwards, so `rest` is the length still to walk
                 int kk = rev ? r->n - 1 - k : k;
@@ -382,8 +393,8 @@ static int routes_far_join(const float *pos, const float *target, int *kOut, int
 static int routes_append(int ri, int k, int rev, float *path, int n, int maxPts, const float *target)
 {
     SRoute *r = &g_routes[ri];
-    for (int m = k + 1; m < r->n && n < maxPts; m++) memcpy(&path[n++ * 3], r->pts[rev ? r->n - 1 - m : m], 12);
-    if (n < maxPts && dist2d(&path[(n - 1) * 3], target) > 1.5f) { memcpy(&path[n * 3], target, 12); n++; }
+    for (int m = k; m < r->n && n < maxPts; m++) memcpy(&path[n++ * 3], r->pts[rev ? r->n - 1 - m : m], 12);
+    if (n < maxPts && dist2d(&path[(n - 1) * 3], target) > 1.5f && foot_connector(&path[(n - 1) * 3], target)) { memcpy(&path[n * 3], target, 12); n++; }
     g_routesUsed++;
     return n;
 }

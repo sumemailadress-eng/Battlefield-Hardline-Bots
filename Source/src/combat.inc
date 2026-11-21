@@ -387,6 +387,7 @@ static float view_elevation(void *soldier)
 enum { CS_IDLE, CS_FIGHT, CS_COVER_RUN, CS_COVER_HOLD, CS_CHASE };
 static const char *kCsNames[] = { "idle", "fight", "to cover", "in cover", "chasing" };
 typedef struct Fight {
+    unsigned supplyBursts;
     ULONGLONG lowCoverAt; int lowCover;   // a low wall toward the enemy (duck behind it)
     void *soldier;
     int state;
@@ -713,7 +714,7 @@ static void fire_control(Bot *b, Fight *f, float d, float yawErr, float pitchErr
     if (fabsf(yawErr) * fmaxf(d, 1) > margin * yawK || fabsf(pitchErr) * fmaxf(d, 1) > margin * pitchK) { f->burstEnd = 0; return; }
     if (t < f->pauseEnd) return;
     { AimLearn *sal = al_soldier(); if (!f->burstEnd) f->burstMul = sal ? sal->b[al_band(d)].v[3] : 1; }
-    if (!f->burstEnd) { f->burstEnd = t + (ULONGLONG)(P->burstMs * f->burstMul * (d > 60 ? 0.5f : 1.0f)); g_cStats[0]++; }
+    if (!f->burstEnd) { if (f->supplyBursts < 1000) f->supplyBursts++; f->burstEnd = t + (ULONGLONG)(P->burstMs * f->burstMul * (d > 60 ? 0.5f : 1.0f)); g_cStats[0]++; }
     if (t < f->burstEnd) {
         // Release every 4th frame in a burst: semi-automatic guns fire on each press, automatic ones barely notice.
         if ((H->frame & 3) != 3) { b->buttons |= BTN_FIRE; f->lastFireAt = t; g_fireFrames++; }
@@ -796,10 +797,15 @@ typedef struct GearUse {
     ULONGLONG at, next, supplyNext, supplyCheckAt, firedAt;
     float to[3];
     void *asset;
+    const char *site;
+    int tripSlot;
+    ULONGLONG packAt, visitUntil, tripUntil, tripCheck, tripProbe;
+    float via[3];
+    int useVia;
 } GearUse;
 static GearUse g_gear[MAX_BOTS];
 static unsigned g_launches, g_supplyDrops, g_farIgnored;
-static struct { float p[3]; int team, kind; ULONGLONG at; } g_supplyDropsNear[32];
+static struct { float p[3]; int team, kind; void *owner; ULONGLONG at; } g_supplyDropsNear[32];
 static unsigned g_supplyDropNext;
 
 static int gear_support(int i, Bot *b, const float *pos, const float *target, int support, ULONGLONG t)
@@ -812,7 +818,7 @@ static int gear_support(int i, Bot *b, const float *pos, const float *target, in
     g->kind = GS_GADGET;
     g->slot = slot;
     g->support = support;
-    g->asset = asset;
+    g->asset = asset; g->site = NULL;
     g->at = t;
     g->fired = g->cancelled = 0;
     g->firedAt = 0;
@@ -823,6 +829,7 @@ static int gear_tick(int i, Bot *b, void *soldier)
 {
     GearUse *g = &g_gear[i];
     if (g->kind == GS_NONE) return 0;
+    b->buttons |= BTN_GEAR_RELEASE;
     ULONGLONG t = now_ms(), e = t - g->at;
     const float *p = soldier_pos(soldier);
     b->fwd = b->strafe = 0;
@@ -861,7 +868,13 @@ static int gear_tick(int i, Bot *b, void *soldier)
                 if (g_supplyDrops++ < 80) H->log("supply: %s uses %s in gadget %d", (char *)b->player + OFF_PLAYER_NAME,
                                                kit_asset_name(g->asset, name, sizeof name), g->slot);
                 if (!tool) {
+                    if (g->support == KIT_AMMO) {
+                        for (int j=0;j<32;j++) if (g_supplyDropsNear[j].owner == b->player && g_supplyDropsNear[j].kind == KIT_AMMO) g_supplyDropsNear[j].at = 0;
+                        H->log("ammo: %s used its ammo can %s at %.1f %.1f %.1f", (char *)b->player + OFF_PLAYER_NAME,
+                               g->site ? g->site : "for a teammate", g->to[0],g->to[1],g->to[2]);
+                    }
                     unsigned k = g_supplyDropNext++ % 32;
+                    g_supplyDropsNear[k].owner = b->player;
                     g_supplyDropsNear[k].kind = g->support;
                     g_supplyDropsNear[k].team = FIELD(b->player, OFF_PLAYER_TEAM, int);
                     g_supplyDropsNear[k].at = t;
@@ -925,6 +938,63 @@ static int supply_near(int team, int kind, const float *pos, ULONGLONG t)
     return 0;
 }
 
+// Walk to a recent friendly drop between fights. Reserve ammunition is not exposed by the
+// bot controller, so use firing bursts since spawn or the last visit as the demand estimate.
+static int ammo_trip(int i, Bot *b, void *soldier, int team, ULONGLONG t)
+{
+    Fight *f = &g_fight[i]; GearUse *g = &g_gear[i];
+    if (!g_set.supplies || b->enemy || f->state != CS_IDLE || t-f->seenAt < 3500 ||
+        g->kind != GS_NONE || b->inVehicle) { g->packAt = 0; return 0; }
+    const float *p = soldier_pos(soldier);
+    if (g->packAt) {
+        int k = g->tripSlot;
+        if (t > g->tripUntil || t-g->packAt > 25000 || g_supplyDropsNear[k].at != g->packAt ||
+            g_supplyDropsNear[k].team != team) { g->packAt = 0; g->tripCheck = t+3500; return 0; }
+        const float *spot = g_supplyDropsNear[k].p;
+        if (g->useVia && dist2d(p,g->via)<0.8f) g->useVia = 0;
+        const float *next = g->useVia ? g->via : spot;
+        if (t >= g->tripProbe) {
+            g->tripProbe = t+350;
+            if (!foot_connector(p,next)) { g->packAt = 0; g->tripCheck=t+3500; return 0; }
+        }
+        if (!g->useVia && dist2d(p,spot)<2 && fabsf(p[1]-spot[1])<1.4f) {
+            if (!g->visitUntil) g->visitUntil = t+2100;
+            b->fwd = b->strafe = b->turn = 0; b->why = "at friendly ammo";
+            if (t>=g->visitUntil) {
+                H->log("ammo: %s visited the drop from %s and resumes its objective", (char *)b->player+OFF_PLAYER_NAME,
+                       g_supplyDropsNear[k].owner && g_supplyDropsNear[k].owner==b->player ? "its own kit" : "a teammate");
+                f->supplyBursts=0; g->packAt=0; g->tripCheck=t+8000;
+            }
+        } else { g->visitUntil=0; steer_towards(b,soldier,next); b->why="going to friendly ammo"; }
+        b->buttons &= ~(BTN_SPRINT|BTN_FIRE); return 1;
+    }
+    if (f->supplyBursts < 2 || t < g->tripCheck) return 0;
+    g->tripCheck=t+1600+b->seed%400;
+    float nearest=f->supplyBursts >= 6 ? 30.0f : 16.0f; int best=-1, via=0;
+    for (int k=0;k<32;k++) {
+        if (!g_supplyDropsNear[k].at || t-g_supplyDropsNear[k].at>17000 || g_supplyDropsNear[k].kind!=KIT_AMMO ||
+            g_supplyDropsNear[k].team!=team || g_supplyDropsNear[k].owner==b->player) continue;
+        const float *q=g_supplyDropsNear[k].p; float dist=dist2d(p,q);
+        if (dist >= nearest || fabsf(p[1]-q[1])>3.0f) continue;
+        int users=0;
+        for (int j=0;j<H->botCount;j++) if (g_gear[j].packAt==g_supplyDropsNear[k].at && g_gear[j].tripSlot==k && g_gear[j].tripUntil>t) users++;
+        if (users>=2) continue;
+        int needsVia=!foot_connector(p,q);
+        if (needsVia) {
+            if (!b->npts || b->wp>=b->npts) continue;
+            const float *w=&b->path[3*b->wp]; dist=dist2d(p,w)+dist2d(w,q);
+            if (dist>=nearest || !foot_connector(p,w) || !foot_connector(w,q)) continue;
+        }
+        best=k; nearest=dist; via=needsVia;
+    }
+    if (best<0) return 0;
+    g->tripSlot=best; g->packAt=g_supplyDropsNear[best].at; g->tripUntil=t+12000;
+    g->useVia=via; g->visitUntil=g->tripProbe=0;
+    if (via) memcpy(g->via,&b->path[3*b->wp],12);
+    H->log("ammo: %s heading %.1f m to friendly ammo after %u firing bursts",(char *)b->player+OFF_PLAYER_NAME,nearest,f->supplyBursts);
+    return 0;
+}
+
 static void gadget_consider(int i, Bot *b, void *soldier)
 {
     ULONGLONG t = now_ms();
@@ -965,7 +1035,25 @@ static void supply_consider(int i, Bot *b, void *soldier, int team)
     if (injured && !supply_near(team, KIT_MED, pos, t) && gear_support(i, b, pos, med, KIT_MED, t)) return;
     int atFlag = b->targetFlag >= 0 && dist2d(pos, b->target) < 9 && fabsf(pos[1] - b->target[1]) < 2;
     if (allies && atFlag && !supply_near(team, KIT_MED, pos, t) && gear_support(i, b, pos, NULL, KIT_MED, t)) return;
-    if ((allies || atFlag) && !supply_near(team, KIT_AMMO, pos, t) && gear_support(i, b, pos, NULL, KIT_AMMO, t)) return;
+    int flag = supply_flag_site(pos), onRoute = b->npts > 1 && b->wp < b->npts;
+    if ((!allies && flag < 0 && !onRoute) || b->inVehicle || player_in_vehicle(b->player) ||
+        !kit_find_gadget(b->player,KIT_AMMO,&slot) || supply_near(team,KIT_AMMO,pos,t)) return;
+    for (int o=0;o<H->botCount;o++) {
+        GearUse *other=&g_gear[o];
+        if (o!=i && H->bots[o] && FIELD(H->bots[o],OFF_PLAYER_TEAM,int)==team && other->kind==GS_GADGET &&
+            other->support==KIT_AMMO && t-other->at<5000 && fabsf(other->to[1]-pos[1])<2 &&
+            dist2d(other->to,pos)<12) return;
+    }
+    const float *toward = onRoute ? &b->path[3*b->wp] : b->target;
+    float yaw=dist2d(pos,toward)>0.5f ? atan2f(toward[0]-pos[0],toward[2]-pos[2]) : soldier_yaw(soldier);
+    for (int side=0;side<3;side++) {
+        float a=yaw+(side==0 ? 0.65f : side==1 ? -0.65f : 0);
+        float high[3]={pos[0]+sinf(a)*1.8f,pos[1]+1.0f,pos[2]+cosf(a)*1.8f};
+        float low[3]={high[0],pos[1]-1.2f,high[2]},floor[3];
+        if (!ray_cast(high,low,floor,NULL) || fabsf(pos[1]-floor[1])>0.8f || !foot_connector(pos,floor)) continue;
+        if (gear_support(i,b,pos,floor,KIT_AMMO,t)) g->site=flag>=0 ? "by a flag" : onRoute ? "on a foot route" : "near allies";
+        break;
+    }
 }
 
 static void combat_tick_inner(int i, Bot *b, void *soldier, int team)

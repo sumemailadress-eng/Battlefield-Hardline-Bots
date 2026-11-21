@@ -164,6 +164,7 @@ static int human_route_pick(const float *pos, const float *target, float *path, 
     }
     if (best < 0) return 0;
     BLRoute *rt = &g_learn->routes[best];
+    if (!foot_connector(pos, rt->pts[bestK])) return 0;
     float nearest = 1e9f; int stop = bestK, n = 0;
     for (int m = bestK; m >= 0 && m < rt->n; m += bestDir) { float d = dist2d(rt->pts[m], target); if (d < nearest) { nearest = d; stop = m; } }
     for (int m = bestK; n < maxPts; m += bestDir) { memcpy(&path[n++ * 3], rt->pts[m], 12); if (m == stop) break; }
@@ -198,11 +199,11 @@ static int human_route_to_flag(const float *pos, const float *target, float *pat
     }
     if (best < 0) return 0;
     BLRoute *rt = &g_learn->routes[best];
-    if (dist2d(pos, rt->pts[bestK]) > 2 && !nav_segment_clear(ray_cast, pos, rt->pts[bestK])) return 0;
+    if (!foot_connector(pos, rt->pts[bestK])) return 0;
     g_lrPick = best;
     int n = 0;
     for (int m = bestK; n < maxPts - 1; m += bestDir) { memcpy(&path[n++ * 3], rt->pts[m], 12); if (m == bestStop) break; }
-    memcpy(&path[n++ * 3], target, 12);
+    if (foot_connector(&path[(n - 1) * 3], target)) memcpy(&path[n++ * 3], target, 12);
     g_humanRoutesUsed++;
     return n;
 }
@@ -251,7 +252,7 @@ static int human_route_far(const float *pos, const float *target, float *join, f
     memcpy(join, rt->pts[bestK], 12);
     int n = 0;
     for (int m = bestK; n < maxTail - 1; m += bestDir) { memcpy(&tail[n++ * 3], rt->pts[m], 12); if (m == bestStop) break; }
-    if (bestReach) memcpy(&tail[n++ * 3], target, 12);
+    if (bestReach && foot_connector(&tail[(n - 1) * 3], target)) memcpy(&tail[n++ * 3], target, 12);
     else g_farLegs++;
     return n;
 }
@@ -290,7 +291,7 @@ static int human_route_leg(const float *pos, const float *target, float *path, i
     }
     if (best < 0) return 0;
     BLRoute *rt = &g_learn->routes[best];
-    if (dist2d(pos, rt->pts[bestK]) > 2 && !nav_segment_clear(ray_cast, pos, rt->pts[bestK])) return 0;
+    if (!foot_connector(pos, rt->pts[bestK])) return 0;
     g_lrPick = best;
     int n = 0;
     for (int m = bestK; n < maxPts; m += bestDir) { memcpy(&path[n++ * 3], rt->pts[m], 12); if (m == bestStop) break; }

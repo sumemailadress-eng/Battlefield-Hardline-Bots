@@ -464,8 +464,8 @@ $xamlText = @'
               <Button x:Name="BtnBotsOn" Style="{StaticResource Btn}" Content="THUGBOT: ON" Width="128"/>
             </StackPanel>
 
-            <TextBlock Text="TICKETS (FROM NEXT SERVER START)" Style="{StaticResource H}"/>
-            <StackPanel Orientation="Horizontal" Margin="0,0,0,10" ToolTip="Tickets per team. Steps of 100 (right-click: 500). Written into the server's startup.txt when you start or restart it">
+            <TextBlock Text="TICKETS (NEXT SERVER START)" Style="{StaticResource H}"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,10" ToolTip="Conquest Large ticket target. Other modes scale their own default by the same percentage. Right-click changes the target by 500.">
               <Button x:Name="BtnTixDn" Style="{StaticResource Btn}" Content="-" Width="34" Padding="0,4"/>
               <Border BorderBrush="#38322C" BorderThickness="1" Width="64" Height="32" Margin="0,0,8,8" Background="#0E0E10">
                 <TextBlock x:Name="TxtTix" Text="1000" FontFamily="Consolas" FontSize="18" Foreground="#FF6A00" HorizontalAlignment="Center" VerticalAlignment="Center"/>
@@ -473,6 +473,8 @@ $xamlText = @'
               <Button x:Name="BtnTixUp" Style="{StaticResource Btn}" Content="+" Width="34" Padding="0,4"/>
             </StackPanel>
 
+            <CheckBox x:Name="ChkTicketUnranked" Content="Use Unranked ticket range" Foreground="#EEEEEE" Margin="0,0,0,8" ToolTip="Use Unranked for this instance at its next start. Ranked clamps the ticket multiplier to at least 75%."/>
+            <TextBlock x:Name="TicketScale" Foreground="#C0C0C0" TextWrapping="Wrap" Margin="0,0,0,8"/>
             <TextBlock Text="SERVER" Style="{StaticResource H}"/>
             <UniformGrid Columns="2">
               <Button x:Name="BtnStart" Style="{StaticResource OBtn}" Content="START SERVER"/>
@@ -627,7 +629,7 @@ try { $win = [Windows.Markup.XamlReader]::Parse($xamlText) } catch { Write-Host 
 function Find-Ctl([string]$name) { $win.FindName($name) }
 $ui = @{}
 foreach ($nm in 'GlowR', 'GlowB', 'LightR', 'LightW', 'LightB', 'TitleBox', 'TitleO', 'TitleB', 'TitleW', 'Slice1', 'Slice2', 'Sub', 'BtnBackStart', 'BtnBackStop', 'DotMysql', 'TxtMysql', 'DotWeb', 'TxtWeb', 'DotRedir', 'TxtRedir', 'DotEmu', 'TxtEmu',
-    'SelTitle', 'SelMap', 'SelImg', 'SelName', 'SelPorts', 'SelStatus', 'BtnBotsDn', 'BtnBotsUp', 'TxtBots', 'BtnTixDn', 'BtnTixUp', 'TxtTix','BtnBotsOn', 'BtnStart', 'BtnStop', 'BtnRestart', 'BtnRound', 'BtnNext', 'BtnVeh', 'BtnDiff', 'BtnAimLearn', 'BtnAimMax', 'BtnVehDmg',
+    'SelTitle', 'SelMap', 'SelImg', 'SelName', 'SelPorts', 'SelStatus', 'BtnBotsDn', 'BtnBotsUp', 'TxtBots', 'BtnTixDn', 'BtnTixUp', 'TxtTix', 'ChkTicketUnranked', 'TicketScale','BtnBotsOn', 'BtnStart', 'BtnStop', 'BtnRestart', 'BtnRound', 'BtnNext', 'BtnVeh', 'BtnDiff', 'BtnAimLearn', 'BtnAimMax', 'BtnVehDmg',
     'TxtProfUser', 'TxtProfPass', 'BtnProfSave', 'TxtProfState', 'BtnLearned', 'Btn3D', 'BtnClassic', 'BtnCheckUpd', 'BtnUpdate', 'RotCount', 'RotTitle', 'LstRot', 'BtnPlay', 'BtnUp', 'BtnDown', 'BtnRemove', 'LstMaps', 'LstModes',
     'BtnGitHub', 'BtnAdd', 'BtnAllMode', 'BtnFill', 'Log', 'TabServers', 'TabMaps', 'PageServers', 'PageMaps', 'BtnShow3D', 'LstReports', 'BtnMapReload', 'BtnMapBrowser', 'WebHost', 'WebMsg') { $ui[$nm] = Find-Ctl $nm }
 foreach ($n in 1..4) { foreach ($p in 'Card', 'CardImg', 'CardState', 'CardName', 'CardMap', 'CardPlayers', 'CardJoin') { $ui["$p$n"] = Find-Ctl "$p$n" } }
@@ -788,6 +790,9 @@ function Refresh-Servers {
                 $st.Text = 'LIVE'; $st.Foreground = $cWhite
                 $mp.Text = "$(Map-Name $s.Info[5])  /  $(Mode-Name $s.Info[4])"
                 $pl.Text = "$($s.Info[2])/$($s.Info[3]) PLAYERS   ROUND $([int]$s.Info[6] + 1)/$($s.Info[7])"
+                if ($s.Info.Count -gt 10 -and $s.Info[8] -eq '2' -and $s.Info[9] -match '^\d+$' -and $s.Info[10] -match '^\d+$') {
+                    $pl.Text += "  /  TEAM SCORES $($s.Info[9]) - $($s.Info[10])"
+                }
             }
             'starting' { $st.Text = 'STARTING'; $st.Foreground = $cOrange; $mp.Text = 'loading...'; $pl.Text = '' }
             default {
@@ -817,6 +822,11 @@ function Update-Selected {
     }
     $ui.TxtBots.Text = $set["Bots$n"]
     $ui.TxtTix.Text = "$(Get-Tickets $n)"
+    $ticketType = Get-TicketType $n
+    $ui.ChkTicketUnranked.IsChecked = $ticketType -eq 'UNRANKED'
+    $pct = Get-TicketPercent $n
+    $ui.TicketScale.Text = "$ticketType  /  $pct% of the mode default"
+    if ($ticketType -eq 'RANKED' -and $pct -lt 75) { $ui.TicketScale.Text += '  /  Ranked minimum 75%' }
     $on = $set["BotsOn$n"] -eq '1'
     $ui.BtnBotsOn.Content = $(if ($on) { 'THUGBOT: ON' } else { 'THUGBOT: OFF' })
     $ui.BtnStart.IsEnabled = $s.State -eq 'off'
@@ -906,20 +916,50 @@ function Start-Helpers {
     }
 }
 
-# tickets per team: the server takes them as vars.gameModeCounter (a percentage of the mode's own count) from its
-# startup.txt. The old 70 was never applied (preset locked), so 1000 tickets = the mode's own count = 100%: counter = tickets / 10
-# (true for Conquest Large's 1000; other modes scale from their own count)
-function Get-Tickets([int]$n) { $t = 0; if (-not [int]::TryParse([string]$set["Tickets$n"], [ref]$t)) { $t = 1000 }; [Math]::Max(100, [Math]::Min(5000, $t)) }
+# The game accepts an integer percentage of the mode default. A Ranked instance clamps low values.
+function Get-Tickets([int]$n) {
+    $t = 0
+    if (-not [int]::TryParse([string]$set["Tickets$n"], [ref]$t)) { $t = 1000 }
+    [Math]::Max(100, [Math]::Min(5000, $t))
+}
+function Get-TicketPercent([int]$n) { [int][Math]::Round((Get-Tickets $n) / 10) }
+function Get-TicketType([int]$n) {
+    if ($set["TicketType$n"]) { return $set["TicketType$n"] }
+    $path = Join-Path (Split-Path $srv[$n].MapList) 'startup.txt'
+    if (Test-Path -LiteralPath $path) {
+        foreach ($line in [IO.File]::ReadLines($path)) {
+            if ($line -match '^\s*vars\.serverType\s+"?(RANKED|UNRANKED|OFFICIAL|PRIVATE)"?\s*$') { return $Matches[1].ToUpperInvariant() }
+        }
+    }
+    return 'RANKED'
+}
 function Set-Tickets([int]$n) {
-    $t = Get-Tickets $n; $pct = [Math]::Max(1, [int][Math]::Round($t / 10))
+    $pct = Get-TicketPercent $n
+    $type = Get-TicketType $n
     $st = Join-Path (Split-Path $srv[$n].MapList) 'startup.txt'
-    if (-not (Test-Path $st)) { Say "Tickets: no $st, left as it is."; return }
-    # "vars.preset NORMAL true" locks the preset, and the server then ignored gameModeCounter (log 2026-11-11: counter 35
-    # executed, round still started on 1000): unlock it ("false"), same preset otherwise
-    $lines = @(Get-Content $st | Where-Object { $_ -notmatch '^\s*vars\.gameModeCounter\b' } |
-        ForEach-Object { $_ -replace '^(\s*vars\.preset\s+\S+)\s+true\s*$', '$1 false' }) + "vars.gameModeCounter $pct"
-    Set-Content $st $lines -Encoding ascii
-    Say "Server ${n}: $t tickets (vars.gameModeCounter $pct)."
+    if (-not (Test-Path -LiteralPath $st)) { throw "Cannot set tickets. Missing $st" }
+    $lines = @(Get-Content -LiteralPath $st)
+    $preset = @($lines | Where-Object { $_ -match '^\s*vars\.preset\b' } | Select-Object -Last 1)
+    $settings = @("vars.serverType $type")
+    if ($preset.Count) { $settings += ($preset[0] -replace '(?i)\s+"?true"?\s*$', ' false') }
+    $settings += @($lines | Where-Object { $_ -notmatch '^\s*vars\.(serverType|preset|gameModeCounter)\b' })
+    $settings += "vars.gameModeCounter $pct"
+    $temp = Join-Path (Split-Path $st) ([IO.Path]::GetRandomFileName())
+    try {
+        [IO.File]::WriteAllLines($temp, [string[]]$settings, [Text.Encoding]::ASCII)
+        [IO.File]::Replace($temp, $st, [NullString]::Value)
+    } finally {
+        if ([IO.File]::Exists($temp)) { [IO.File]::Delete($temp) }
+    }
+    Say "Server $n ticket settings saved for next start ($type, $pct%)."
+}
+
+function Change-Tickets([int]$delta) {
+    $n = $script:sel
+    $set["Tickets$n"] = "$([Math]::Max(100, [Math]::Min(5000,(Get-Tickets $n) + $delta)))"
+    Set-Tickets $n
+    Save-Settings
+    Update-Selected
 }
 
 function Start-Bf4([int]$n) {
@@ -1098,10 +1138,17 @@ $ui.BtnBotsDn.Add_Click({ Safe { $n = $script:sel; $v = [Math]::Max(0, [int]$set
 $ui.BtnBotsUp.Add_Click({ Safe { $n = $script:sel; $v = [Math]::Min(63, [int]$set["Bots$n"] + 1); $set["Bots$n"] = "$v"; Save-Settings; Update-Selected } })
 $ui.BtnBotsDn.Add_MouseRightButtonUp({ Safe { $n = $script:sel; $set["Bots$n"] = '0'; Save-Settings; Update-Selected } })
 $ui.BtnBotsUp.Add_MouseRightButtonUp({ Safe { $n = $script:sel; $set["Bots$n"] = '63'; Save-Settings; Update-Selected } })
-$ui.BtnTixDn.Add_Click({ Safe { $n = $script:sel; $set["Tickets$n"] = "$([Math]::Max(100, (Get-Tickets $n) - 100))"; Save-Settings; Update-Selected } })
-$ui.BtnTixUp.Add_Click({ Safe { $n = $script:sel; $set["Tickets$n"] = "$([Math]::Min(5000, (Get-Tickets $n) + 100))"; Save-Settings; Update-Selected } })
-$ui.BtnTixDn.Add_MouseRightButtonUp({ Safe { $n = $script:sel; $set["Tickets$n"] = "$([Math]::Max(100, (Get-Tickets $n) - 500))"; Save-Settings; Update-Selected } })
-$ui.BtnTixUp.Add_MouseRightButtonUp({ Safe { $n = $script:sel; $set["Tickets$n"] = "$([Math]::Min(5000, (Get-Tickets $n) + 500))"; Save-Settings; Update-Selected } })
+$ui.BtnTixDn.Add_Click({ Safe { Change-Tickets -100 } })
+$ui.BtnTixUp.Add_Click({ Safe { Change-Tickets 100 } })
+$ui.BtnTixDn.Add_MouseRightButtonUp({ Safe { Change-Tickets -500 } })
+$ui.BtnTixUp.Add_MouseRightButtonUp({ Safe { Change-Tickets 500 } })
+$ui.ChkTicketUnranked.Add_Click({ Safe {
+    $n = $script:sel
+    $set["TicketType$n"] = if ($ui.ChkTicketUnranked.IsChecked) { 'UNRANKED' } else { 'RANKED' }
+    Set-Tickets $n
+    Save-Settings
+    Update-Selected
+} })
 $ui.BtnBotsOn.Add_Click({ Safe { $n = $script:sel; $set["BotsOn$n"] = $(if ($set["BotsOn$n"] -eq '1') { '0' } else { '1' }); Save-Settings; Update-Selected; Say "Server ${n}: Thugbot $(if ($set["BotsOn$n"] -eq '1') { 'on' } else { 'off' }) from its next start." } })
 $ui.BtnProfSave.Add_Click({ Safe { Save-Profile } })
 $ui.TxtProfPass.Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Return') { Safe { Save-Profile } } })
