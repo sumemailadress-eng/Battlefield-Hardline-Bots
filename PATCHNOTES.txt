@@ -1,6 +1,16 @@
 ThugBot patch notes
 ===================
 
+Vehicle updates since V0.4.3
+----------------------------
+- Drivers follow road detours through the final approach, slow for the tightest upcoming turn,
+  and check the space behind them before reversing. A blocked approach can trigger a new route.
+- Loaded transports can prioritize an elevated enemy flag and fly around nearby buildings.
+  Pilots check the landing surface and slow over it before calling for a passenger drop.
+  Ledge riders deploy first. At a high objective a seated rider can also parachute to the flag.
+- Live View shows the pilot's drop approach and the rider's descent. The server log records
+  completed right-angle turns, passenger release requests, and observed landings.
+
 V0.4.3 - Early Release
 ----------------------
 - Vehicles slow before sharp forks, follow turns in route order, and check clearance before

@@ -124,6 +124,8 @@ static void help_use_gear(int i, Bot *b, const float *pos, const float *to, ULON
 static int help_target(int i, const float *pos, float *out, int *nearOut);   // drive.inc: Follow me / Need backup
 static int name_is_air(const char *nm);   // drive.inc
 static int trunk_find(const float *pos, float *rear, void **car);   // drive.inc
+static void airlift_reset(void);
+static int drop_descent(int i, Bot *b, void *soldier, const float *pos, ULONGLONG t);
 static int heli_ledge(int i, Bot *b, void *soldier, const float *pos, int team, ULONGLONG t);   // heli.inc
 static const float *veh_pos(void *v); static void veh_lead(void *v, float *q, float dist, float shotSpeed);   // drive.inc
 static int playarea_route_ok(const float (*pts)[3], int n); static int playarea_may_drop(int drop, int total, const char *what, const char *path);   // playarea.inc
@@ -254,6 +256,7 @@ static void brain_level_reset(void)
     g_learnBlocked = 0;
     if (g_learn) { bl_free(g_learn); free(g_learn); g_learn = NULL; }
     memset(g_bot, 0, sizeof g_bot);
+    airlift_reset();
     combat_level_reset();   // [combat.inc hook]
     routes_level_reset();
     lifts_level_reset();
@@ -1253,6 +1256,7 @@ static void bot_think(int i)
     if (!b->alive) { b->alive = 1; memcpy(b->progressPos, pos, 12); b->progressAt = t; b->targetFlag = -1; b->route = -1; b->lroute = -1; routes_note_spawn(team, pos); b->spawnAt = t; memcpy(b->spawnPos, pos, 12); }
     if (heli_ledge(i, b, soldier, pos, team, t)) { b->alive = 1; return; }
     memcpy(b->lastPos, pos, 12);
+    if (drop_descent(i, b, soldier, pos, t)) return;
 
     if (lift_ride(b, soldier, pos, t, 1)) {
         b->idleAt = b->progAt = b->progressAt = t;

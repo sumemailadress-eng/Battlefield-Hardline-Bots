@@ -1009,5 +1009,6 @@ __declspec(dllexport) void thugbot_shutdown(void)
     routes_save();
     strcpy(H->levelKey, g_levelKey);   // the next core keeps the level name until the next level loads
     if (g_nav) { nav_cancel_paths(); nav_free(g_nav); g_nav = NULL; }   // let a frame that is inside our hooks finish before the DLL goes away
+    free(g_roadComponent); g_roadComponent = NULL;
     H->log("core shutdown: hooks removed");
 }
