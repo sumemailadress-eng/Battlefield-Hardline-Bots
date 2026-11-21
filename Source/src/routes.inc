@@ -397,6 +397,7 @@ static float seg_dist2d(const float *p, const float *a, const float *b)
     float x = a[0] + ax * u - p[0], z = a[2] + az * u - p[2];
     return sqrtf(x * x + z * z);
 }
+static void resume_drop(int i);   // brain.inc (2026-11-15)
 static void routes_cut_near(const float *p)
 {
     int n = 0;
@@ -410,7 +411,7 @@ static void routes_cut_near(const float *p)
     for (int i = 0; i < H->botCount; i++) {
         Bot *b = &g_bot[i];
         for (int j = b->wp > 0 ? b->wp - 1 : 0; j + 1 < b->npts; j++)
-            if (seg_dist2d(p, &b->path[j * 3], &b->path[(j + 1) * 3]) < 2.5f && fabsf(b->path[j * 3 + 1] - p[1]) < 2.5f) { b->npts = 0; b->planAt = 0; b->route = -1; bots++; break; }
+            if (seg_dist2d(p, &b->path[j * 3], &b->path[(j + 1) * 3]) < 2.5f && fabsf(b->path[j * 3 + 1] - p[1]) < 2.5f) { b->npts = 0; b->planAt = 0; b->route = -1; resume_drop(i); bots++; break; }
     }
     if (n || bots) { static unsigned logged; if (logged++ < 40) H->log("routes: %d saved route(s) and %d bot route(s) went through the cut at %.0f %.0f %.0f - planning them again", n, bots, p[0], p[1], p[2]); }
 }
@@ -476,7 +477,7 @@ static void report_write(void)
     for (int k = 0, first = 1; k < g_cpCount; k++) {
         if (!flag_takeable(k)) continue;
         const float *p = (const float *)((char *)g_cps[k] + OFF_CP_POSITION);
-        fprintf(f, "%s{\"x\":%.1f,\"z\":%.1f,\"r\":%.1f,\"owner\":%d}", first ? "" : ",", p[0], p[2], FIELD(g_cps[k], OFF_CP_RADIUS, float), FIELD(g_cps[k], OFF_CP_OWNER_TEAM, int));
+        fprintf(f, "%s{\"x\":%.1f,\"y\":%.1f,\"z\":%.1f,\"r\":%.1f,\"owner\":%d}", first ? "" : ",", p[0], p[1], p[2], FIELD(g_cps[k], OFF_CP_RADIUS, float), FIELD(g_cps[k], OFF_CP_OWNER_TEAM, int));
         first = 0;
     }
     fputs("],\"spawns\":[", f);

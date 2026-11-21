@@ -1,6 +1,6 @@
 ThugBot - player bots for a Battlefield Hardline server (BF-Portable)
 =====================================================================
-Version 0.3.1, early release. What changed: PATCHNOTES.txt. Vehicles are not officially supported yet.
+Version 0.4.3, early release. See PATCHNOTES.txt for changes.
 
 ThugBot fills a Battlefield Hardline dedicated server with bots that play like players: they capture and
 defend flags, fight with cover, crouch, vault, open doors, knife glass, throw grenades, use grenade
@@ -103,8 +103,30 @@ FILES IN THIS FOLDER
   Thugbot-Keys.bat        route hotkeys (F5 - F11)
   Thugbot-Chat.ps1        the chat-command bridge (started by Start-Thugbot)
   Open-Thugbot-Map.bat    the learned-map page
-  Open-Thugbot-3DMap.bat  3D map of the bots' scan: view, draw and edit routes (needs Node.js; tools\Map3D)
+  Open-Thugbot-3DMap.bat  View, draw and edit routes in the 3D map (Node.js required).
   Source\                 full source code, build.bat (Visual Studio 2019 Build Tools, x64), tools
+
+The 3D editor opens in Surface textures mode. Use Floor range to isolate a parking deck, or orbit
+under an overpass to see its underside and the road below. Turn Live view on to see current bots,
+vehicles and flags. Select a bot in the list to follow it and show its active path.
+On installations with multiple running Hardline servers, choose the game port in Live view.
+
+The optional Map image mode uses the map plan from your own Hardline installation. With Python
+and Pillow installed, run the extractor from the Thugbot folder and reload the 3D map.
+
+  py tools\Map3D\fb_minimap.py "C:\Games\Battlefield Hardline" tools\Map3D\textures mp_downtown
+
+Replace the game path with the folder containing bfh.exe. You can pass multiple map IDs after
+the output directory. Surface textures and floor clipping are available without extracting game files.
+
+COMMO ROSE
+----------
+Use Need Ammo or Need Medic on foot to call an equipped teammate. Need Repair calls an equipped
+bot to a damaged, stopped ground vehicle. Bots also deploy supplies near teammates and objectives
+when they carry the matching gadget. In-game chat aliases are !ammo, !medic and !repair.
+
+Bots also respond to Get In, Get Out, Follow Me, Need Backup and Need a Ride. In Turf War, aim
+directly at a flag and use Attack to direct the bots in your squad.
 
 In the server folder the mod writes Thugbot_25200.log (what the bots do) and reads commands
 from Thugbot_cmd.txt (one per write), for example:

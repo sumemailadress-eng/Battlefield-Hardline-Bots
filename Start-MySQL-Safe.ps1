@@ -1,4 +1,4 @@
-# Starts XAMPP MySQL the safe way (used by Thugbot Control and the FloodBots launchers).
+# Starts XAMPP MySQL the safe way (used by Thugbot Control and the the earlier development build launchers).
 # Why: when mysqld runs hidden with no console, its log lines get written INTO the privilege table
 # files and corrupt them (MySQL then refuses to start). So this:
 #   1. checks the mysql system tables and restores any broken one from XAMPP's clean copy (backup first),

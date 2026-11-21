@@ -78,6 +78,78 @@ static void unhook_call(CallHook *h)
     h->installed = 0;
 }
 
+// Commo rose orders (2026-11-16). VeniceNetwork.Order messages (category hash 0x802ae469, type 0xb85845ac =
+// "VeniceNetworkOrderMessage") reach two listeners that end in a tail jump (E9) to their handler(ctx, msg):
+//   RVA 0x435a10 (one per game, checks only the type): jmp at 0x435a4f -> 0x436280 (acts on RequestSquadOrder only)
+//   RVA 0x399d60 (one per player, checks both hashes): jmp at 0x399da9 -> 0x39b430 (the voice-over of the order)
+// In the message: +0x40 a weak reference to the sender's ServerPlayer, +0x50 the target player's (resolved by RVA
+// 0x11c2620, minus 0x1570 - the handlers read the team at that + 0xcec), +0x60 the OrderType. The enum (type info
+// strings, in order, and the voice-over switch of 0x39b430: cases 1..25, none for 17 Attack): 1 RequestHeal,
+// 2 LetMeHeal, 3 RequestAmmo, 4 LetMeGiveAmmo, 5 LetMeRepair, 6 RequestRepair, 7 RequestRide, 8 GoGoGo, 9 FollowMe,
+// 10 Negative, 11 Sorry, 12 ThankYou, 13 RogerThat, 14 NeedBackup, 15 GetIn, 16 GetOut, 17 Attack, 18 RequestSquadOrder.
+// Both jumps are hooked (the same message seen twice within 250 ms counts once); every order is queued for the game
+// tick (drive.inc getin_tick) and then handled as before. "orders 0" stops reacting to them.
+#define RVA_ORDER_JMP_GAME     0x435a4f
+#define RVA_ORDER_HANDLER_GAME 0x436280
+#define RVA_ORDER_JMP_PLAYER   0x399da9
+#define RVA_ORDER_HANDLER_PLAYER 0x39b430
+#define RVA_WEAK_RESOLVE       0x11c2620
+#define OFF_WEAK_TO_PLAYER     0x1570
+#define ORDER_HEAL 1
+#define ORDER_AMMO 3
+#define ORDER_REPAIR 6
+#define ORDER_RIDE 7
+#define ORDER_FOLLOW 9
+#define ORDER_BACKUP 14
+#define ORDER_GETIN 15
+#define ORDER_GETOUT 16
+#define ORDER_ATTACK 17
+typedef void (*OrderHandler_t)(void *ctx, void *msg);
+static OrderHandler_t o_orderGame, o_orderPlayer; static CallHook g_hookOrderGame, g_hookOrderPlayer;
+static volatile LONG g_ordersOn = 1;
+static struct { void *player; int type; } g_orderQ[16];
+static volatile LONG g_orderHead, g_orderTail;
+static unsigned g_ordersSeen; static void *g_orderLastMsg; static int g_orderLastType; static ULONGLONG g_orderLastAt;
+static void *order_player(void *msg, int off)
+{
+    typedef char *(*Weak_t)(void *ref);
+    char *p = ((Weak_t)(H->image + RVA_WEAK_RESOLVE))((char *)msg + off);
+    return p ? p - OFF_WEAK_TO_PLAYER : NULL;
+}
+static void order_note(void *msg)
+{
+    __try {
+        if (g_ordersOn && msg && !IsBadReadPtr(msg, 0x68)) {
+            int type = *(int *)((char *)msg + 0x60);
+            ULONGLONG now = GetTickCount64();
+            int dup = msg == g_orderLastMsg && type == g_orderLastType && now - g_orderLastAt < 250;   // (the same message reaches both listeners, and one per player)
+            g_orderLastMsg = msg; g_orderLastType = type; g_orderLastAt = now;
+            if (!dup) {
+                void *from = order_player(msg, 0x40);
+                g_ordersSeen++;
+                if (from && g_orderHead - g_orderTail < 16) { LONG k = g_orderHead % 16; g_orderQ[k].player = from; g_orderQ[k].type = type; InterlockedIncrement(&g_orderHead); }
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { g_ordersOn = 0; }
+}
+static void h_orderGame(void *ctx, void *msg) { order_note(msg); o_orderGame(ctx, msg); }
+static void h_orderPlayer(void *ctx, void *msg) { order_note(msg); o_orderPlayer(ctx, msg); }
+// hook_call for a 5-byte JMP rel32 (E9) instead of a call
+static void *hook_jmp(CallHook *h, uintptr_t siteRva, uintptr_t targetRva, void *fn, int slot)
+{
+    uintptr_t site = H->image + siteRva;
+    if (*(unsigned char *)site != 0xE9) { H->log("hook: no jump at %#llx", (unsigned long long)siteRva); return NULL; }
+    int32_t rel = *(int32_t *)(site + 1);
+    uintptr_t target = site + 5 + rel;
+    if (target != H->image + targetRva) { H->log("hook: jump at %#llx goes to %#llx, expected %#llx - wrong server build?", (unsigned long long)siteRva, (unsigned long long)(target - H->image), (unsigned long long)targetRva); return NULL; }
+    unsigned char *stub = g_stubs + slot * 16;
+    stub[0] = 0x48; stub[1] = 0xB8; memcpy(stub + 2, &fn, 8);
+    stub[10] = 0xFF; stub[11] = 0xE0;
+    if (!patch_rel32(site + 1, (int32_t)((intptr_t)stub - (intptr_t)(site + 5)))) return NULL;
+    h->site = site; h->origRel = rel; h->installed = 1;
+    return (void *)target;
+}
+
 // ---- bot driving ----
 // play = the brain (brain.inc); the others are test patterns; off = the engine's own random input.
 enum { DRIVE_OFF, DRIVE_STILL, DRIVE_FORWARD, DRIVE_CIRCLE, DRIVE_TURN, DRIVE_PLAY, DRIVE_COUNT };
@@ -159,7 +231,7 @@ static void h_inputCopy(void *dst, void *src)
     if (g_drive != DRIVE_OFF) {
         unsigned btn = g_testButtons;
         float pitch = g_testPitch, roll = 0, yaw = g_testYaw, thr = 0;
-        int heliOwns = 0;   // a flying pilot: pitch, yaw and roll go in every frame, zero too (FloodBots: an untracked axis holds its last level)
+        int heliOwns = 0;   // a flying pilot: pitch, yaw and roll go in every frame, zero too (earlier development code: an untracked axis holds its last level)
         if (g_drive == DRIVE_PLAY) {
             unsigned b = 0; float p = 0, r = 0, y = 0, th = 0;
             int rc = brain_buttons((char *)dst - 0x10, &b, &p, &r, &y, &th);
@@ -528,8 +600,8 @@ static void perf_dump(void)
     g_jitterTurn = g_jitterStrafe = g_jitterTurnFight = g_jitterSteer = 0;
     g_perfSum = g_perfMax = 0; g_perfFrames = g_perfRays = g_perfRaysMax = 0; memset(g_perfPart, 0, sizeof g_perfPart);
 }
-// (FloodBots port 2026-11-12, the tester: "make sure ThugBot doesn't have this issue" - none of ThugBot's 155 logged level loads had it; this is a guard.)
-// (FloodBots, the tester 2026-11-12: "Dawnbreaker / Hammerhead - no vehicles were used, I drew routes!") The sequencer's level name is sometimes another map's:
+// (earlier development code port 2026-11-12, the tester: "make sure ThugBot doesn't have this issue" - none of ThugBot's 155 logged level loads had it; this is a guard.)
+// (earlier development code, the tester 2026-11-12: "Dawnbreaker / Hammerhead - no vehicles were used, I drew routes!") The sequencer's level name is sometimes another map's:
 // at 16:50 the server ran Dawnbreaker (MP_Tremors - its flags) while the key said XP4_SubBase, so Hammerhead's grid, routes and learned data
 // were used - and saved back - on Dawnbreaker (XP4_SubBase.v8.routes holds Tremors' flags, MP_Damage holds Hammerhead's ...). Check: once
 // the flags are in, every saved routes file names its flags ("flag@x,z"); the map whose flags fit these best (all found, fewest extra) is
@@ -790,6 +862,13 @@ __declspec(dllexport) int thugbot_init(ThugbotHost *host)
     o_seqLevelLoaded = (SeqLevelLoaded_t)hook_call(&g_hookSeq, RVA_SEQ_LEVEL_LOADED_CALL, RVA_SEQ_LEVEL_LOADED, (void *)h_seqLevelLoaded, 3);
     o_inputCopy = (InputCopy_t)hook_call(&g_hookCopy, RVA_PP_INPUT_COPY_CALL, RVA_INPUT_COPY, (void *)h_inputCopy, 4);
     o_spawnGo = (SpawnGo_t)hook_call(&g_hookSpawn, RVA_SPAWN_GO_CALL, RVA_SPAWN_GO, (void *)h_spawnGo, 5);
+    o_orderGame = (OrderHandler_t)hook_jmp(&g_hookOrderGame, RVA_ORDER_JMP_GAME, RVA_ORDER_HANDLER_GAME, (void *)h_orderGame, 20);
+    o_orderPlayer = (OrderHandler_t)hook_jmp(&g_hookOrderPlayer, RVA_ORDER_JMP_PLAYER, RVA_ORDER_HANDLER_PLAYER, (void *)h_orderPlayer, 21);
+    o_buildUnlocks = (BuildUnlocksFn)hook_call(&g_hookBuildUnlocks, RVA_BUILD_UNLOCKS_CALL, RVA_BUILD_UNLOCKS, (void *)h_buildUnlocks, 22);
+    if (o_buildUnlocks) o_rollCustomization = (RollCustomizationFn)hook_call(&g_hookRollCustomization,
+        RVA_ROLL_CUSTOMIZATION_CALL, RVA_ROLL_CUSTOMIZATION, (void *)h_rollCustomization, 23);
+    H->log("kits: support loadout selection %s", o_rollCustomization ? "ready" : "unavailable");
+    H->log("order hooks: game listener %s, player listener %s (commo rose orders)", o_orderGame ? "in" : "FAILED", o_orderPlayer ? "in" : "FAILED");
     H->log("spawn: seat hook %s, %d%% of spawns aimed at a teammate's vehicle when one has room", o_spawnGo ? "in" : "NOT in: the game's choice only", g_spawnSeatPct);
     H->log("vault hook none, carry %s (velocity from soldier+0x70)", g_vaultMove ? "on" : "off");
     int dmgHook = hook_vtable_slot(&g_onDamageSlot, RVA_SOLDIER_ON_DAMAGE_VT, RVA_SOLDIER_ON_DAMAGE, (void *)h_onDamage, (void **)&o_onDamage);
@@ -856,6 +935,10 @@ __declspec(dllexport) void thugbot_command(char *line)
         const char *a = line[9] == ' ' ? line + 10 : "";
         if (*a == 's') drivetest_start(0, (float)atof(a + 1)); else drivetest_start(*a ? (float)atof(a) : 0.0f, 0);
     }
+    else if (!strcmp(line, "squads")) squads_dump();
+    else if (!strncmp(line, "squadplay ", 10)) { g_squadPlay = atoi(line + 10); H->log("squadplay %d (squads take the same flag, lane and vehicle)", g_squadPlay); }
+    else if (!strncmp(line, "orders ", 7)) { g_ordersOn = atoi(line + 7); H->log("orders %d (bots react to commo rose orders; %u order(s) seen)", (int)g_ordersOn, g_ordersSeen); }
+    else if (!strncmp(line, "crewfollow ", 11)) { g_crewFollow = atoi(line + 11); H->log("crewfollow %d (bots in a human's vehicle get out when the human does)", g_crewFollow); }
     else if (!strncmp(line, "chat ", 5)) chat_enqueue(line + 5);   // from Thugbot-Chat.ps1: "chat <name>|<text>"
     else if (!strcmp(line, "unblock")) InterlockedExchange(&g_unblockAll, 1);
     else if (!strncmp(line, "cell ", 5)) { if (sscanf(line + 5, "%f %f", &g_cdAt[0], &g_cdAt[1]) == 2) InterlockedExchange(&g_cdDo, 1); }
@@ -869,6 +952,7 @@ __declspec(dllexport) void thugbot_command(char *line)
     else if (!strcmp(line, "vehname")) InterlockedExchange(&g_vehName, 1);
     else if (!strcmp(line, "vehscan")) InterlockedExchange(&g_vehScan, 1);
     else if (!strcmp(line, "vehprobe")) InterlockedExchange(&g_vehProbe, 1);
+    else if (!strcmp(line, "kits")) kits_dump();
     else if (!strncmp(line, "supplies ", 9)) { g_set.supplies = atoi(line + 9) != 0; H->log("supplies: bots %s kits for teammates", g_set.supplies ? "drop" : "don't drop"); }
     else if (!strncmp(line, "jumpmode ", 9)) { g_jumpMode = atoi(line + 9); H->log("jumpmode %d (0 both, 1 action, 2 button, 3 alternate)", g_jumpMode); }
     else if (!strcmp(line, "refine")) refine_dump();
@@ -914,6 +998,8 @@ __declspec(dllexport) void thugbot_shutdown(void)
     unhook_call(&g_hookSeq);
     unhook_call(&g_hookCopy);
     unhook_call(&g_hookSpawn);
+    unhook_call(&g_hookOrderGame); unhook_call(&g_hookOrderPlayer);
+    unhook_call(&g_hookRollCustomization); unhook_call(&g_hookBuildUnlocks);
     weapscan_stop();
     unhook_vtable_slot(&g_onDamageSlot, (void *)o_onDamage); if (g_vehDmgSlotH) unhook_vtable_slot(&g_vehDmgSlotH, (void *)o_vehDmgH); if (g_vehDmgSlotB) unhook_vtable_slot(&g_vehDmgSlotB, (void *)o_vehDmgB);
     if (g_ctfSlot) unhook_vtable_slot(&g_ctfSlot, (void *)o_ctfOnMsg);

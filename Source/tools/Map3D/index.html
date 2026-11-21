@@ -1,10 +1,11 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Thugbot 3D Map</title>
+<link rel="icon" href="data:,">
 <style>
 :root{--bg:#101114;--panel:#1a1b20;--fg:#e8e8ec;--mut:#9a9aa4;--line:#2e2f36;--acc:#4dabf7;--warn:#f59f00;--bad:#ff6b6b}
 *{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:13px/1.4 system-ui,sans-serif;overflow:hidden}
-#view{position:fixed;inset:0 0 0 300px}#view canvas{display:block}
+#view{position:fixed;inset:0 0 0 300px}#view canvas{display:block}#map{min-width:0}
 #side{position:fixed;left:0;top:0;bottom:0;width:300px;background:var(--panel);border-right:1px solid var(--line);overflow-y:auto;padding:10px 12px}
 h1{font-size:15px;margin:0 0 8px}h3{font-size:12px;margin:14px 0 4px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
 select,button,input[type=number]{background:#24252c;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:inherit}
@@ -22,6 +23,7 @@ input[type=range]{flex:1;min-width:80px}
 #load{position:fixed;left:50%;top:45%;transform:translate(-50%,-50%);background:var(--panel);border:1px solid var(--line);padding:12px 18px;border-radius:8px;display:none}
 a{color:var(--acc)}
 </style>
+<script src="/patrolgen.js"></script>
 <script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}</script>
 </head><body>
 <div id="side">
@@ -29,40 +31,58 @@ a{color:var(--acc)}
   <div class="row"><select id="map" style="flex:1"></select><button id="loadBtn">Load</button></div>
   <div id="warn"></div>
   <h3>Scan</h3>
-  <div class="row"><label><input type="checkbox" id="sFloor" checked>Floors</label><label><input type="checkbox" id="sWater" checked>Water</label><label><input type="checkbox" id="sWall" checked>Walls</label></div>
+  <div class="row"><label><input type="checkbox" id="sFloor" checked>Floors</label><label><input type="checkbox" id="sWater" checked>Water</label><label><input type="checkbox" id="sWall">Walls</label></div>
+  <div class="row"><label title="Tints the water blue: what the scan found as water plus what you painted (red tint: water you erased)"><input type="checkbox" id="sWmask" checked><span class="sw" style="background:#228be6"></span>Water mask <span id="wCount"></span></label></div>
   <div class="row">Hide above <input type="range" id="cut" min="0" max="1000" value="1000"><span id="cutV"></span></div>
+  <div class="row"><label>Floor range (m) <input id="floorMin" type="number" step="0.5" placeholder="Min" style="width:64px"><input id="floorMax" type="number" step="0.5" placeholder="Max" style="width:64px"></label><button id="floorReset">Reset</button></div>
   <div class="row">Point size <input type="range" id="psize" min="1" max="12" value="4"></div>
   <div class="row">Floors as <select id="fmode"><option value="1">Surface (shows ramps)</option><option value="0">Points</option></select></div>
-  <div class="row">Colour by <select id="cmode"><option value="3" id="cmodeTex">Map image (game)</option><option value="0">Slope (flat to steep)</option><option value="1">Height</option><option value="2">Plain</option></select></div>
+  <div class="row">Colour by <select id="cmode"><option value="4">Surface textures</option><option value="3" id="cmodeTex">Map image (game)</option><option value="0">Slope (flat to steep)</option><option value="1">Height</option><option value="2">Plain</option></select></div>
   <div id="legend" style="color:var(--mut);font-size:12px"></div>
-  <div class="row"><label><input type="checkbox" id="sFlags" checked>Flags</label><label><input type="checkbox" id="sSpawns" checked>Spawns</label><label><input type="checkbox" id="sExits" checked><span class="sw" style="background:#22d3ee"></span>Water exits</label><a id="ply" href="#">Export PLY</a></div>
+  <div class="row"><label><input type="checkbox" id="sFlags" checked>Flags</label><label><input type="checkbox" id="sSpawns">Spawns</label><label><input type="checkbox" id="sExits" checked><span class="sw" style="background:#22d3ee"></span>Water exits</label><a id="ply" href="#">Export PLY</a></div>
   <div class="row"><label title="Ground with the same material as under the parked vehicles, and where vehicles have been driven. Rough: on most maps it also covers plain ground, so it is not a road map"><input type="checkbox" id="sRoads"><span class="sw" style="background:#f1f3f5"></span>Road material (rough) <span class="sw" style="background:#74c0fc"></span>Driven <span id="roadCount"></span></label></div>
   <div class="row"><label title="Worked out from the scan by shape, so it is a guide: it can miss some and name others wrongly"><input type="checkbox" id="sOver"><span class="sw" style="background:#ff9ff3"></span>Bridges <span class="sw" style="background:#ffa94d"></span>Beams <span class="sw" style="background:#ff4757"></span>Low (under 4.5 m) <span id="overCount"></span></label></div>
   <div class="row"><label title="Where players may be in this mode, from the game's level files: each team's combat area"><input type="checkbox" id="sPlay" checked><span class="sw" style="background:#ff6b6b"></span>Play area</label> <select id="playMode"></select></div>
-  <div class="row"><label title="Where vehicles stand when a round starts (the bots save them while a map runs)"><input type="checkbox" id="sVehs" checked><span class="sw" style="background:#ffd43b"></span>Vehicles <span id="vehCount"></span></label><label title="The model name above each vehicle"><input type="checkbox" id="sVehNames" checked>Names</label></div>
+  <div class="row"><label><input type="checkbox" id="liveOn">Live view</label><button id="liveMap" hidden>Open running map</button><select id="liveServer" aria-label="Live server" hidden></select></div>
+  <div class="row"><span id="liveStatus" role="status"></span><select id="liveBot" aria-label="Follow a bot" hidden><option value="">Follow a bot</option></select></div>
+  <div class="row"><label title="Where vehicles stand when a round starts (the bots save them while a map runs)"><input type="checkbox" id="sVehs" checked><span class="sw" style="background:#ffd43b"></span>Vehicles <span id="vehCount"></span></label><label title="The model name above each vehicle"><input type="checkbox" id="sVehNames">Names</label></div>
   <details id="vehBox"><summary style="cursor:pointer;color:var(--mut)">Vehicle list (click to fly there)</summary><div id="vehList" style="max-height:200px;overflow-y:auto;font-size:12px"></div></details>
   <div class="row"><label title="Hides the scan far outside the flags, spawns and routes"><input type="checkbox" id="crop" checked>Only the play area</label></div>
   <h3>Routes</h3>
   <div class="row">
-    <label><input type="checkbox" id="rlearn" checked><span class="sw" style="background:#f08c00"></span>Learned</label>
+    <label><input type="checkbox" id="rlearn"><span class="sw" style="background:#f08c00"></span>Learned</label>
     <label><input type="checkbox" id="rveh" checked><span class="sw" style="background:#20c997"></span>Vehicle</label>
-    <label><input type="checkbox" id="rplanned" checked><span class="sw" style="background:#339af0"></span><span class="sw" style="background:#ff6b6b"></span>Spawn/flag (team 1 / 2)</label>
+    <label><input type="checkbox" id="rplanned"><span class="sw" style="background:#339af0"></span><span class="sw" style="background:#ff6b6b"></span>Spawn/flag (team 1 / 2)</label>
+    <label title="Patrol routes for boats (Thugbot_learned\&lt;map&gt;.boatroutes)"><input type="checkbox" id="rboat" checked><span class="sw" style="background:#ff5cd6"></span>Boat patrol</label>
   </div>
   <div id="list"></div>
   <h3>Edit</h3>
-  <div class="row"><button id="tSel" class="on">Select / move</button><button id="tDraw">Draw new</button><button id="tExit" title="Places where swimming bots should head to get out of the water">Water exits</button></div>
-  <div class="row">New route type <select id="newType"><option value="learn:foot">Learned foot route</option><option value="learn:ground">Learned ground-vehicle route</option><option value="veh">Vehicle network route</option><option value="planned">Spawn/flag route (auto-named)</option></select></div>
+  <div class="row"><button id="tSel" class="on">Select / move</button><button id="tDraw">Draw new</button><button id="tExit" title="Places where swimming bots should head to get out of the water">Water exits</button><button id="tWater" title="Paint or erase water with a brush">Paint water</button></div>
+  <div class="row">New route type <select id="newType"><option value="learn:foot">Learned foot route</option><option value="learn:ground">Learned ground-vehicle route</option><option value="veh">Vehicle network route</option><option value="planned">Spawn/flag route (auto-named)</option><option value="boat">Boat patrol route</option></select></div>
   <div class="row"><label title="Adds a waypoint every 3 m (vehicles 6 m) between your clicks, following the scanned ground"><input type="checkbox" id="dense" checked>Fill in waypoints along the ground</label></div>
   <div class="row"><button id="finish">Finish route</button><button id="undo">Undo</button><button id="delPt">Delete point</button><button id="delRoute">Delete route</button><button id="rev">Reverse</button><button id="branch" title="New route: this route up to the picked waypoint, then carry on drawing">Branch from here</button></div>
   <div class="row" id="selInfo" style="color:var(--mut)"></div>
   <div class="row"><button id="save" class="save" disabled>Save routes</button><span id="dirty"></span></div>
   <div id="msg"></div>
+  <h3>Water &amp; boat patrols</h3>
+  <div class="row">Brush <select id="wMode"><option value="add">Paint water</option><option value="erase">Erase water</option><option value="clear">Back to the scan's own</option></select></div>
+  <div class="row">Size <input type="range" id="wSize" min="2" max="250" value="15"><span id="wSizeV"></span></div>
+  <div class="row">Water height <input type="number" id="wHeight" step="0.5" style="width:80px"> m <button id="wAuto" title="The most common water height of the scan in the play area">Auto</button></div>
+  <div class="row" style="color:var(--mut);font-size:12px">With "Paint water" on: left-drag paints, right-drag pans, wheel zooms, Shift+click takes the height of the surface you click. Ctrl+Z undoes a stroke.</div>
+  <div class="row"><button id="wClear" title="Removes everything painted on this map (the scan's own water stays)">Clear painting</button></div>
+  <div class="row">Keep off the shore <input type="number" id="gClear" value="14" min="3" max="80" style="width:60px"> m</div>
+  <div class="row"><label title="One loop through water next to every flag; on open water with fewer than 2 flags near it, a loop round the middle"><input type="checkbox" id="gLoop" checked>Patrol loop past the flags</label></div>
+  <div class="row"><label title="From where each boat stands at round start to the patrol loop"><input type="checkbox" id="gLaunch" checked>Routes from the boat docks</label></div>
+  <div class="row"><button id="gen">Generate boat patrols</button></div>
+  <div id="genMsg" style="color:var(--mut);font-size:12px"></div>
+  <div class="row" style="color:var(--warn);font-size:12px">Thugbot's bot DLL does not read boat patrols (&lt;map&gt;.boatroutes) yet: they are saved for when it does.</div>
   <h3>How to</h3>
   <div id="help">
   <b>Mouse:</b> left-drag orbit, right-drag pan, wheel zoom. <b>WASD</b> move, <b>Q/E</b> down/up, <b>Shift</b> faster, hold the <b>middle button</b> to look around. <b>T</b> top view.<br>
   <b>Select / move:</b> click a route line to select it. Click a white waypoint to pick it, then click the ground to move it there. <b>Alt+click</b> the ground inserts a waypoint after the picked one.<br>
   <span id="helpExits"><b>Water exits:</b> click the ground at a ramp or stairs out of the water to add one, click an exit to remove it. Swimming bots head for the nearest one within 150 m.<br></span><b>Routes out of an HQ or parking lot:</b> the coloured boxes are the vehicles. Pick "Vehicle network route" below, click <b>Draw new</b> and start your route right beside a vehicle.<br><b>Draw new:</b> click the ground to add waypoints, <b>Enter</b> finishes. Use "Hide above" to see into buildings and click lower floors.<br>
   <b>Branch from here:</b> pick a waypoint, press it, draw the new end - a new route that shares the start.<br><b>Del</b> deletes the picked waypoint, <b>Ctrl+Z</b> undoes, <b>Esc</b> cancels.<br>
+  <b>Water:</b> blue is water - what the bots' scan found plus what you paint. Paint where the scan missed water, erase where it is wrong, then <b>Generate boat patrols</b>: a loop through open water past the flags plus a route from each boat dock to it. The patrols are ordinary routes (pink): select, move, delete or draw them like the others ("Boat patrol route" type).<br>
   Saving writes the map's route files (old copies go to Thugbot_learned_backup_3d). Bots read them when the map next loads.
   </div>
 </div>
@@ -85,12 +105,15 @@ scene.add(new THREE.AmbientLight(0xffffff, 0.8)); const sun = new THREE.Directio
 // BF (x, y, z) -> three (x, y, -z): looking down, +x is right and +z is up, like the 2D learned map
 const T = (p, lift = 0) => new THREE.Vector3(p[0], p[1] + lift, -p[2]);
 const B = v => [v.x, v.y, -v.z];
-const COLORS = { learn: 0xf08c00, veh: 0x20c997, planned: 0x4dabf7, sel: 0xffffff };
+const COLORS = { learn: 0xf08c00, veh: 0x20c997, planned: 0x4dabf7, boat: 0xff5cd6, sel: 0xffffff };
 
 let surf = null, surfMat = null;
 let meta = null, cloud = null, cloudMat = null, index = null, data = null, routes = [], sel = -1, pick = -1, tool = 'sel', drawing = null;
-let dirty = { learn: false, veh: false, planned: false, exits: false }, undo = [], limits = {};
-const groups = { routes: new THREE.Group(), marks: new THREE.Group(), handles: new THREE.Group(), roads: new THREE.Group(), over: new THREE.Group(), play: new THREE.Group(), vehs: new THREE.Group(), exits: new THREE.Group() }; Object.values(groups).forEach(g => scene.add(g));
+const CLEAN = () => ({ learn: false, veh: false, planned: false, exits: false, boat: false, water: false });
+let dirty = CLEAN(), undo = [], limits = {};
+// water: per scan cell, auto = the scan found water (autoH its height), paint = 0 as scanned / 1 painted water (paintH) / 2 erased
+let water = null;
+const groups = { live: new THREE.Group(), water: new THREE.Group(), brush: new THREE.Group(), routes: new THREE.Group(), marks: new THREE.Group(), handles: new THREE.Group(), roads: new THREE.Group(), over: new THREE.Group(), play: new THREE.Group(), vehs: new THREE.Group(), exits: new THREE.Group() }; Object.values(groups).forEach(g => scene.add(g));
 const lineMats = {};
 const lmat = (color, width) => { const k = color + ':' + width; if (!lineMats[k]) { lineMats[k] = new LineMaterial({ color, linewidth: width, worldUnits: false }); lineMats[k].resolution.set(innerWidth - 300, innerHeight); if (color === COLORS.sel) lineMats[k].depthTest = false; } return lineMats[k]; };
 
@@ -117,39 +140,78 @@ async function loadMap(map) {
     if (Object.values(dirty).some(x => x) && !confirm('Routes not saved. Load another map anyway?')) return;
     $('load').style.display = 'block'; $('load').textContent = 'Loading the scan of ' + map + '…';
     try { localStorage.setItem('fb3d.map', map); } catch (e) {}
-    const buf = await (await fetch('/api/cloud?map=' + map)).arrayBuffer();
+    const scan = await fetch('/api/cloud?map=' + map);
+    if (!scan.ok) { $('load').style.display = 'none'; msg('Could not load this map scan.'); return; }
+    const buf = await scan.arrayBuffer();
     const jl = new DataView(buf).getUint32(0, true);
     meta = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, jl)));
-    const pos = new Float32Array(buf, 4 + jl, meta.count * 3), kind = new Uint8Array(buf, 4 + jl + meta.count * 12, meta.count), slope = new Uint8Array(buf, 4 + jl + meta.count * 13, meta.count);
+    const pos = new Float32Array(buf, 4 + jl, meta.count * 3), kind = new Uint8Array(buf, 4 + jl + meta.count * 12, meta.count), slope = new Uint8Array(buf, 4 + jl + meta.count * 13, meta.count), road = new Uint8Array(buf, 4 + jl + meta.count * 14, meta.count);
     for (let i = 2; i < pos.length; i += 3) pos[i] = -pos[i];
     if (cloud) { scene.remove(cloud); cloud.geometry.dispose(); } if (surf) { scene.remove(surf); surf.geometry.dispose(); surf = null; }
-    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('kind', new THREE.BufferAttribute(new Float32Array(kind), 1)); g.setAttribute('slope', new THREE.BufferAttribute(new Float32Array(slope), 1));
-    const COL = `attribute float kind; attribute float slope; uniform float ymin, ymax, cut, size, scale, mode, floorPts; uniform vec3 show; uniform vec4 box; uniform sampler2D tex; uniform vec4 texRect; varying vec3 vC;
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setAttribute('kind', new THREE.BufferAttribute(new Float32Array(kind), 1)); g.setAttribute('slope', new THREE.BufferAttribute(new Float32Array(slope), 1)); g.setAttribute('road', new THREE.BufferAttribute(new Float32Array(road), 1));
+    const COL = `attribute float kind; attribute float slope; uniform float ymin, ymax, low, cut, size, scale, mode, floorPts; uniform vec3 show; uniform vec4 box; uniform sampler2D tex; uniform vec4 texRect; varying vec3 vC;
+            uniform sampler2D wtex; uniform vec4 wRect; uniform float wOn, wBase;
+            vec4 wtint(){ if (wOn < 0.5) return vec4(0.0);   // the water mask: r = water, g b = its height, a = 2 painted / 3 erased
+              vec4 m = texture2D(wtex, vec2((position.x - wRect.x) / wRect.z, (-position.z - wRect.y) / wRect.w));
+              float wy = wBase + (m.g * 255.0 * 256.0 + m.b * 255.0) / 50.0;
+              if (m.r > 0.5 && abs(position.y - wy) < 3.0) return m.a > 1.5 / 255.0 ? vec4(0.25, 0.6, 1.0, 0.7) : vec4(0.1, 0.4, 1.0, 0.6);
+              if (m.a > 2.5 / 255.0) return vec4(1.0, 0.3, 0.3, 0.45);
+              return vec4(0.0); }
             vec3 ramp(float t){ return clamp(vec3(1.5-abs(4.0*t-3.0), 1.5-abs(4.0*t-2.0), 1.5-abs(4.0*t-1.0)), 0.0, 1.0); }
             bool hidden(){ float on = kind < 0.5 ? show.x : kind < 1.5 ? show.y : show.z;
-              return on < 0.5 || position.y > cut || position.x < box.x || position.x > box.y || position.z < box.z || position.z > box.w; }
+              return on < 0.5 || (position.y > cut || position.y < low) || position.x < box.x || position.x > box.y || position.z < box.z || position.z > box.w; }
             vec3 colour(){ float t = clamp((position.y - ymin) / max(1.0, ymax - ymin), 0.0, 1.0);
               vec3 sl = slope < 6.0 ? vec3(0.30, 0.78, 0.36) : slope < 20.0 ? vec3(0.95, 0.85, 0.25) : slope < 35.0 ? vec3(1.0, 0.55, 0.15) : vec3(0.95, 0.2, 0.2);
-              vec3 fl = mode < 0.5 ? sl * (0.65 + 0.35 * t) : mode < 1.5 ? mix(vec3(0.35), ramp(0.3 + 0.7 * t), 0.8) : mode < 2.5 ? vec3(0.55 + 0.4 * t) : texture2D(tex, vec2((position.x - texRect.x) / texRect.z, 1.0 - (-position.z - texRect.y) / texRect.w)).rgb * 1.35;
+              vec3 fl = mode < 0.5 ? sl * (0.65 + 0.35 * t) : mode < 1.5 ? mix(vec3(0.35), ramp(0.3 + 0.7 * t), 0.8) : mode < 2.5 || mode > 3.5 ? vec3(0.55 + 0.4 * t) : texture2D(tex, vec2((position.x - texRect.x) / texRect.z, 1.0 - (-position.z - texRect.y) / texRect.w)).rgb * 1.35;
               return kind < 0.5 ? fl : kind < 1.5 ? (mode > 2.5 ? fl : vec3(0.08, 0.2, 0.5)) : mix(vec3(0.85, 0.5, 0.3), vec3(1.0), 0.15) * (0.6 + 0.4 * t); }`;
     cloudMat = cloudMat || new THREE.ShaderMaterial({
-        uniforms: { ymin: { value: 0 }, ymax: { value: 1 }, cut: { value: 1e9 }, size: { value: 4 }, show: { value: new THREE.Vector3(1, 1, 1) }, scale: { value: 500 }, mode: { value: +$('cmode').value }, floorPts: { value: 0 }, box: { value: new THREE.Vector4(-1e9, 1e9, -1e9, 1e9) }, texLines: { value: 0 }, tex: { value: null }, texRect: { value: new THREE.Vector4(0, 0, 1, 1) } },
+        uniforms: { wtex: { value: null }, wRect: { value: new THREE.Vector4(0, 0, 1, 1) }, wOn: { value: 0 }, wBase: { value: 0 }, ymin: { value: 0 }, ymax: { value: 1 }, low: { value: -1e9 }, cut: { value: 1e9 }, size: { value: 4 }, show: { value: new THREE.Vector3(+$("sFloor").checked, +$("sWater").checked, +$("sWall").checked) }, scale: { value: 500 }, mode: { value: +$('cmode').value }, floorPts: { value: 0 }, box: { value: new THREE.Vector4(-1e9, 1e9, -1e9, 1e9) }, texLines: { value: 0 }, tex: { value: null }, texRect: { value: new THREE.Vector4(0, 0, 1, 1) } },
         vertexShader: COL + `
             void main(){ if (hidden() || (floorPts < 0.5 && kind < 1.5)) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
-              vC = colour(); vec4 mv = modelViewMatrix * vec4(position, 1.0); gl_Position = projectionMatrix * mv;
-              gl_PointSize = clamp(size * 0.4 * scale / -mv.z, 1.0, 40.0); }`,
+              vec4 wt = wtint(); vC = mix(colour(), wt.rgb, wt.a); vec4 mv = modelViewMatrix * vec4(position, 1.0); gl_Position = projectionMatrix * mv;
+              gl_PointSize = clamp(size * (kind > 1.5 ? 0.23 : 0.4) * scale / -mv.z, 1.0, 24.0); }`,
         fragmentShader: `varying vec3 vC; void main(){ gl_FragColor = vec4(vC, 1.0); }` });
-    // the floor surface: lit from above-ish so slopes and steps read as shading
+    // Use world coordinates so the texture keeps the same scale on every deck.
+    // The reverse side of the mesh is the underside of an elevated floor.
     surfMat = surfMat || new THREE.ShaderMaterial({ uniforms: cloudMat.uniforms, side: THREE.DoubleSide,
-        vertexShader: COL + ` varying float vHide; varying vec2 vUv; varying float vLit; varying float vFloor;
-            void main(){ vHide = hidden() ? 1.0 : 0.0; vFloor = kind < 1.5 ? 1.0 : 0.0; vUv = vec2((position.x - texRect.x) / texRect.z, 1.0 - (-position.z - texRect.y) / texRect.w); vec3 n = normalize(normal); float lit = 0.35 + 0.65 * abs(dot(n, normalize(vec3(0.45, 1.0, 0.3))));
-              vLit = lit; vC = colour() * lit; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
-        fragmentShader: `uniform sampler2D tex; uniform float mode, texLines; varying vec3 vC; varying float vHide; varying vec2 vUv; varying float vLit; varying float vFloor; void main(){ if (vHide > 0.01) discard; vec3 c = vC; if (mode > 2.5 && vFloor > 0.5) { vec3 t = texture2D(tex, vUv).rgb; c = texLines > 0.5 ? mix(vec3(0.20, 0.23, 0.21) * vLit, vec3(1.0, 0.95, 0.75), clamp(t.r * 2.5, 0.0, 1.0)) : t * 1.35 * vLit; } gl_FragColor = vec4(c, 1.0); }`,
+        vertexShader: COL + ` attribute float road; varying vec3 vWorld; varying vec2 vUv; varying float vLit, vKind, vRoad; varying vec4 vW;
+            void main(){
+              vW = wtint(); vWorld = position; vKind = kind; vRoad = road;
+              vUv = vec2((position.x - texRect.x) / texRect.z, 1.0 - (-position.z - texRect.y) / texRect.w);
+              vLit = 0.45 + 0.55 * abs(dot(normalize(normal), normalize(vec3(0.45, 1.0, 0.3))));
+              vC = colour() * vLit; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }`,
+        fragmentShader: `uniform sampler2D tex; uniform float mode, texLines, low, cut; uniform vec3 show; uniform vec4 box;
+            varying vec3 vC, vWorld; varying vec2 vUv; varying float vLit, vKind, vRoad; varying vec4 vW;
+            float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+            vec3 surface() {
+                vec2 p = vWorld.xz, seam = abs(fract(p / vec2(4.0, 5.5)) - 0.5);
+                float joint = smoothstep(0.475, 0.5, max(seam.x, seam.y));
+                float grain = (hash(floor(p * 26.0)) - 0.5) * 0.10 * (1.0 - smoothstep(0.015, 0.085, length(fwidth(p))));
+                float broad = (hash(floor(p * 0.9)) - 0.5) * 0.075;
+                vec3 concrete = vec3(0.56, 0.55, 0.51) + grain + broad - 0.1 * joint;
+                if (!gl_FrontFacing) return (vec3(0.44, 0.44, 0.42) + grain + broad - 0.14 * joint) * 0.58;
+                vec3 asphalt = vec3(0.29, 0.31, 0.33) + grain + broad;
+                return mix(concrete, asphalt, smoothstep(0.17, 0.82, vRoad)) * vLit;
+            }
+            void main(){
+                bool water = vKind > 0.5;
+                if ((water ? show.y : show.x) < 0.5 || vWorld.y < low || vWorld.y > cut ||
+                    vWorld.x < box.x || vWorld.x > box.y || vWorld.z < box.z || vWorld.z > box.w) discard;
+                vec3 c = vC;
+                if (!water && mode > 3.5) c = surface();
+                if (!water && mode > 2.5 && mode < 3.5) {
+                    vec3 t = texture2D(tex, vUv).rgb;
+                    c = !gl_FrontFacing ? surface() : texLines > 0.5 ?
+                        mix(vec3(0.20, 0.23, 0.21) * vLit, vec3(1.0, 0.95, 0.75), clamp(t.r * 2.5, 0.0, 1.0)) : t * 1.35 * vLit;
+                }
+                c = mix(c, vW.rgb * vLit, vW.a); gl_FragColor = vec4(c, 1.0);
+            }`,
         polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 });
     cloud = new THREE.Points(g, cloudMat); scene.add(cloud);
     if (meta.tris) {
-        const start = 4 + jl + meta.count * 14, idx = new Uint32Array(buf, start + (4 - (meta.count * 2) % 4) % 4, meta.tris);
-        const g2 = new THREE.BufferGeometry(); ['position', 'kind', 'slope'].forEach(k => g2.setAttribute(k, g.getAttribute(k)));
+        const start = 4 + jl + meta.count * 15, idx = new Uint32Array(buf, start + (4 - (meta.count * 3) % 4) % 4, meta.tris);
+        const g2 = new THREE.BufferGeometry(); ['position', 'kind', 'slope', 'road'].forEach(k => g2.setAttribute(k, g.getAttribute(k)));
         g2.setIndex(new THREE.BufferAttribute(idx, 1)); g2.computeVertexNormals();
         surf = new THREE.Mesh(g2, surfMat); scene.add(surf);
     }
@@ -159,32 +221,36 @@ async function loadMap(map) {
     const cellOf = i => { const cx = Math.round((pos[i * 3] - meta.x0) / meta.cell), cz = Math.round((-pos[i * 3 + 2] - meta.z0) / meta.cell); return cx < 0 || cz < 0 || cx >= meta.w || cz >= meta.h ? -1 : cz * meta.w + cx; };
     for (let i = 0; i < meta.count; i++) if (kind[i] < 2) { const c = cellOf(i); if (c >= 0) cnt[c + 1]++; }
     for (let c = 0; c < cells; c++) cnt[c + 1] += cnt[c];
-    const hs = new Float32Array(cnt[cells]), fill = cnt.slice(0, cells);
-    for (let i = 0; i < meta.count; i++) if (kind[i] < 2) { const c = cellOf(i); if (c >= 0) hs[fill[c]++] = pos[i * 3 + 1]; }
-    index = { start: cnt, hs };
+    const hs = new Float32Array(cnt[cells]), kinds = new Uint8Array(cnt[cells]), fill = cnt.slice(0, cells);
+    for (let i = 0; i < meta.count; i++) if (kind[i] < 2) { const c = cellOf(i); if (c >= 0) { hs[fill[c]] = pos[i * 3 + 1]; kinds[fill[c]++] = kind[i]; } }
+    index = { start: cnt, hs, kinds };
     cloudMat.uniforms.ymin.value = meta.ymin; cloudMat.uniforms.ymax.value = meta.ymax; cloudMat.uniforms.mode.value = +$('cmode').value;
-    $('cut').value = 1000; setCut();
+    $('cut').value = 1000; $('floorMin').value = $('floorMax').value = ''; setCut();
     {   // the map's own image, where it was read from the game files; slope colours otherwise
         const ti = await (await fetch('/api/texinfo?map=' + map)).json().catch(() => null);
         $('cmodeTex').disabled = !ti;
         if (ti) {
-            cloudMat.uniforms.tex.value = await new THREE.TextureLoader().loadAsync('/api/teximg?map=' + map);
+            if (cloudMat.uniforms.tex.value) cloudMat.uniforms.tex.value.dispose();
+            cloudMat.uniforms.tex.value = await new THREE.TextureLoader().loadAsync('/api/teximg?map=' + map).catch(() => null);
+            $('cmodeTex').disabled = !cloudMat.uniforms.tex.value;
             cloudMat.uniforms.texRect.value.set(ti.x0, ti.z0, ti.x1 - ti.x0, ti.z1 - ti.z0); cloudMat.uniforms.texLines.value = ti.lines ? 1 : 0;
-            if ($('cmode').value === '3' && $('sWall').checked) { $('sWall').checked = false; cloudMat.uniforms.show.value.z = 0; }   // (the walls hide the image: back on with the Walls box)
-            cloudMat.uniforms.tex.value.colorSpace = THREE.NoColorSpace;
-            cloudMat.needsUpdate = true;
-        } else if ($('cmode').value === '3') $('cmode').value = '0';
+            if (cloudMat.uniforms.tex.value) cloudMat.uniforms.tex.value.colorSpace = THREE.NoColorSpace;
+        }
+        if ($('cmodeTex').disabled && $('cmode').value === '3') $('cmode').value = '4';
         cloudMat.uniforms.mode.value = +$('cmode').value; legend();
     }
     $('ply').href = '/api/ply?map=' + map;
     data = await (await fetch('/api/routes?map=' + map)).json();
-    routes = [...data.learn.map(r => ({ type: 'learn', ...r })), ...data.veh.map(r => ({ type: 'veh', ...r })), ...data.planned.map(r => ({ type: 'planned', ...r }))];
+    routes = [...data.learn.map(r => ({ type: 'learn', ...r })), ...data.veh.map(r => ({ type: 'veh', ...r })), ...data.planned.map(r => ({ type: 'planned', ...r })), ...(data.boat || []).map(r => ({ type: 'boat', ...r }))];
     data.spawnList = data.spawnLines.map(l => { const v = l.split(/\s+/); return { team: +v[1], p: [+v[2], +v[3], +v[4]] }; });
-    sel = pick = -1; drawing = null; undo = []; dirty = { learn: false, veh: false, planned: false, exits: false };
+    sel = pick = -1; drawing = null; undo = []; wUndo = []; dirty = CLEAN();
+    await loadWater(map);
     $('warn').style.display = data.live ? 'block' : 'none';
     $('warn').textContent = 'This map is running on the server now. Bots load route files when a map starts, and the server can write over the learned file while the map runs, so save after the round changes, or save and then change map.';
-    playArea(); buildMarks(); buildRoads(map); overFor = null; groups.over.clear(); $('overCount').textContent = ''; buildOver(); buildVehicles(); buildExits(); rebuildRoutes(); topView(); updateUI();
+    playArea(); if (water) $('wHeight').value = autoWaterHeight(); buildMarks(); buildRoads(map); overFor = null; groups.over.clear(); $('overCount').textContent = ''; buildOver(); buildVehicles(); buildExits(); rebuildRoutes(); topView(); updateUI();
     $('load').style.display = 'none';
+    lastFollowPoint = null;
+    if ($('liveOn').checked) renderLive(liveSnapshot);
     msg(`${map}: ${(meta.count / 1e6).toFixed(2)} M scan points, ${routes.length} routes.`);
 }
 
@@ -193,14 +259,14 @@ function pickSurface(ev) {
     const r = renderer.domElement.getBoundingClientRect();
     const ndc = new THREE.Vector2(((ev.clientX - r.left) / r.width) * 2 - 1, -((ev.clientY - r.top) / r.height) * 2 + 1);
     const ray = new THREE.Raycaster(); ray.setFromCamera(ndc, camera);
-    const o = ray.ray.origin, d = ray.ray.direction, cut = cloudMat.uniforms.cut.value, step = meta.cell * 0.25;
+    const o = ray.ray.origin, d = ray.ray.direction, cut = cloudMat.uniforms.cut.value, low = cloudMat.uniforms.low.value, step = meta.cell * 0.25;
     let py = o.y;
     for (let t = 0; t < 6000; t += step) {
         const x = o.x + d.x * t, y = o.y + d.y * t, z = -(o.z + d.z * t);
         const cx = Math.round((x - meta.x0) / meta.cell), cz = Math.round((z - meta.z0) / meta.cell);
         if (cx >= 0 && cz >= 0 && cx < meta.w && cz < meta.h && inBox(x, z)) {
             const c = cz * meta.w + cx; let best = null;
-            for (let k = index.start[c]; k < index.start[c + 1]; k++) { const h = index.hs[k]; if (h <= cut && h <= Math.max(py, y) + 0.4 && h >= Math.min(py, y) - 0.4 && (best === null || h > best)) best = h; }
+            for (let k = index.start[c]; k < index.start[c + 1]; k++) { const h = index.hs[k]; if (!(index.kinds[k] ? $('sWater') : $('sFloor')).checked) continue; if (h >= low && h <= cut && h <= Math.max(py, y) + 0.4 && h >= Math.min(py, y) - 0.4 && (best === null || h > best)) best = h; }
             if (best !== null) return [x, best, z];
         }
         py = y;
@@ -214,7 +280,7 @@ function buildMarks() {
     const groundAt = (x, z) => { const cx = Math.round((x - meta.x0) / meta.cell), cz = Math.round((z - meta.z0) / meta.cell); if (cx < 0 || cz < 0 || cx >= meta.w || cz >= meta.h) return meta.ymin; const c = cz * meta.w + cx; let lo = null; for (let k = index.start[c]; k < index.start[c + 1]; k++) lo = lo === null ? index.hs[k] : Math.min(lo, index.hs[k]); return lo ?? meta.ymin; };
     const label = (text, color, p) => { const cv = document.createElement('canvas'); cv.width = 256; cv.height = 64; const x = cv.getContext('2d'); x.font = 'bold 40px system-ui'; x.fillStyle = color; x.strokeStyle = '#000'; x.lineWidth = 6; x.strokeText(text, 8, 46); x.fillText(text, 8, 46); const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(cv), depthTest: false })); s.scale.set(24, 6, 1); s.position.copy(p); s.renderOrder = 10; return s; };
     data.flags.forEach((f, i) => {
-        const y = groundAt(f.x, f.z), g = new THREE.Group(); g.userData.kind = 'flag';
+        const y = Number.isFinite(f.y) ? f.y : groundAt(f.x, f.z), g = new THREE.Group(); g.userData.kind = 'flag';
         const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.4, 14), new THREE.MeshBasicMaterial({ color: 0xe8a400 })); pole.position.copy(T([f.x, y + 7, f.z])); g.add(pole);
         const ring = new THREE.Mesh(new THREE.RingGeometry(Math.max(4, f.r) - 0.6, Math.max(4, f.r), 64), new THREE.MeshBasicMaterial({ color: 0xe8a400, side: THREE.DoubleSide, transparent: true, opacity: 0.6 })); ring.rotation.x = -Math.PI / 2; ring.position.copy(T([f.x, y + 0.5, f.z])); g.add(ring);
         g.add(label(String.fromCharCode(65 + i) + (f.owner ? ' T' + f.owner : ''), '#ffd43b', T([f.x + 6, y + 16, f.z]))); groups.marks.add(g);
@@ -346,7 +412,7 @@ function list() {
     routes.forEach((r, i) => {
         if (!$('r' + r.type).checked) return;
         const d = document.createElement('div'); d.className = i === sel ? 'sel' : '';
-        const name = r.type === 'planned' ? `${r.from} → ${r.to}` : r.type === 'veh' ? 'vehicle' + (r.fb ? ' (Fun-Bots)' : '') : r.kind + ' (used ' + r.uses + ')';
+        const name = r.type === 'planned' ? `${r.from} → ${r.to}` : r.type === 'boat' ? 'boat ' + (isLoop(r.pts) ? 'patrol loop' : 'route') : r.type === 'veh' ? 'vehicle' + (r.fb ? ' (Fun-Bots)' : '') : r.kind + ' (used ' + r.uses + ')';
         d.innerHTML = `<span class="sw" style="background:#${routeColor(r).toString(16).padStart(6, '0')}"></span>#${i} ${name} · ${r.pts.length} pts · ${len(r.pts).toFixed(0)} m`;
         d.onclick = () => { select(i); focusRoute(r); }; el.appendChild(d);
     });
@@ -357,11 +423,14 @@ function updateUI() {
     const over = [];
     if (c('learn') > limits.learnRoutes) over.push(`learned routes ${c('learn')}/${limits.learnRoutes} (bots load only the first ${limits.learnRoutes})`);
     if (c('veh') > limits.vRoutes) over.push(`vehicle routes ${c('veh')}/${limits.vRoutes}`);
-    const d = Object.entries(dirty).filter(([k, v]) => v).map(([k]) => k === 'learn' ? 'learned' : k === 'veh' ? 'vehicle' : k === 'exits' ? 'water exits' : 'spawn/flag');
+    if (c('boat') > limits.boatRoutes) over.push(`boat patrols ${c('boat')}/${limits.boatRoutes}`);
+    const d = Object.entries(dirty).filter(([k, v]) => v).map(([k]) => ({ learn: 'learned', veh: 'vehicle', exits: 'water exits', boat: 'boat patrols', water: 'water', planned: 'spawn/flag' })[k]);
     $('save').disabled = !d.length; $('dirty').textContent = d.length ? 'changed: ' + d.join(', ') : 'saved';
     const r = sel >= 0 ? routes[sel] : drawing;
     $('selInfo').textContent = r ? `${drawing ? 'Drawing' : 'Route #' + sel}: ${r.type}${r.from ? ' ' + r.from + ' → ' + r.to : ''}, ${r.pts.length} pts${pick >= 0 ? ', waypoint ' + pick + ' picked' : ''}` + (over.length ? ' · ' + over.join('; ') : '') : over.join('; ');
-    [['tSel', 'sel'], ['tDraw', 'draw'], ['tExit', 'exit']].forEach(([id, k]) => $(id).classList.toggle('on', tool === k));
+    [['tSel', 'sel'], ['tDraw', 'draw'], ['tExit', 'exit'], ['tWater', 'water']].forEach(([id, k]) => $(id).classList.toggle('on', tool === k));
+    controls.mouseButtons.LEFT = tool === 'water' ? null : THREE.MOUSE.ROTATE;   // (the brush paints with the left button)
+    groups.brush.visible = tool === 'water';
 }
 function select(i) { sel = i; pick = -1; rebuildRoutes(); updateUI(); }
 function focusRoute(r) { const b = new THREE.Box3(); r.pts.forEach(p => b.expandByPoint(T(p))); const c = b.getCenter(new THREE.Vector3()), s = Math.max(40, b.getSize(new THREE.Vector3()).length()); controls.target.copy(c); camera.position.copy(c).add(new THREE.Vector3(0, s * 0.8, s * 0.6)); }
@@ -392,7 +461,7 @@ function labelNear(p, preferFlag) {
     if (preferFlag) return bestF || bestS;
     return bestS && (!bestF || ds <= df) ? bestS : bestF;
 }
-function floorNear(x, y, z) { const cx = Math.round((x - meta.x0) / meta.cell), cz = Math.round((z - meta.z0) / meta.cell); if (cx < 0 || cz < 0 || cx >= meta.w || cz >= meta.h) return y; const c = cz * meta.w + cx; let best = null; for (let k = index.start[c]; k < index.start[c + 1]; k++) { const h = index.hs[k]; if (best === null || Math.abs(h - y) < Math.abs(best - y)) best = h; } return best === null || Math.abs(best - y) > 4 ? y : best; }
+function floorNear(x, y, z) { const cx = Math.round((x - meta.x0) / meta.cell), cz = Math.round((z - meta.z0) / meta.cell); if (cx < 0 || cz < 0 || cx >= meta.w || cz >= meta.h) return y; const c = cz * meta.w + cx; let best = null; for (let k = index.start[c]; k < index.start[c + 1]; k++) { const h = index.hs[k]; if (h < cloudMat.uniforms.low.value || h > cloudMat.uniforms.cut.value) continue; if (best === null || Math.abs(h - y) < Math.abs(best - y)) best = h; } return best === null || Math.abs(best - y) > 4 ? y : best; }
 function densify(pts, step, maxPts) {
     let total = 0; for (let i = 1; i < pts.length; i++) total += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][2] - pts[i - 1][2]);
     if (maxPts) step = Math.max(step, total / (maxPts - 1));
@@ -412,7 +481,8 @@ function finish() {
         if (!drawing.from || !drawing.to) { msg('Spawn/flag routes must start and end within 90 m of a spawn or a flag. Move the ends or pick another route type.'); return; }
         if (drawing.pts.length > limits.pPts) msg(`Spawn/flag routes hold ${limits.pPts} points, the rest will be cut on save.`);
     }
-    if ($('dense').checked) drawing.pts = densify(drawing.pts, drawing.type === 'veh' ? 6 : 3, drawing.type === 'planned' ? limits.pPts : 0);
+    if (drawing.type === 'boat') drawing.pts = densify(drawing.pts, 25, limits.boatPts);   // (boats: a waypoint every 25 m is plenty)
+    else if ($('dense').checked) drawing.pts = densify(drawing.pts, drawing.type === 'veh' ? 6 : 3, drawing.type === 'planned' ? limits.pPts : 0);
     snapshot(); if (drawing.obj) { groups.routes.remove(drawing.obj); drawing.obj = null; }
     routes.push(drawing); touch(drawing.type); const i = routes.length - 1; drawing = null; tool = 'sel'; select(i);
     msg('Route added. Save to write it.');
@@ -446,6 +516,7 @@ function rayHit(e, objs, thr = 2) {
     return ray.intersectObjects(objs, false);
 }
 function click(e) {
+    if (tool === 'water') return;   // (the brush: pointer events below)
     if (tool === 'exit') {
         const p = pickSurface(e); if (!p) { msg('No scanned surface there.'); return; }
         snapshot();
@@ -473,18 +544,167 @@ function click(e) {
     const p = pickSurface(e); if (p) msg(`x ${p[0].toFixed(1)}, y ${p[1].toFixed(1)}, z ${p[2].toFixed(1)}`);
     if (sel >= 0 && pick < 0) select(-1);
 }
-renderer.domElement.addEventListener('pointermove', e => { if (!meta || down) return; const p = pickSurface(e); hud.textContent = p ? `x ${p[0].toFixed(1)}  y ${p[1].toFixed(1)}  z ${p[2].toFixed(1)}` + (tool === 'draw' ? '  ·  click to add a waypoint, Enter to finish' : tool === 'exit' ? '  ·  click to add / remove a water exit' : '') : (tool === 'draw' ? 'Click the ground to add waypoints' : meta.map); });
+renderer.domElement.addEventListener('pointermove', e => { if (!meta || down) return; const p = pickSurface(e); hud.textContent = p ? `x ${p[0].toFixed(1)}  y ${p[1].toFixed(1)}  z ${p[2].toFixed(1)}` + (tool === 'draw' ? '  ·  click to add a waypoint, Enter to finish' : tool === 'exit' ? '  ·  click to add / remove a water exit' : tool === 'water' ? '  ·  drag to ' + ($('wMode').value === 'add' ? 'paint' : 'erase') + ' water, Shift+click takes this height' : '') : (tool === 'draw' ? 'Click the ground to add waypoints' : meta.map); });
+
+// ---- water (the tester 2026-11-15: "any way to paint water on maps? It would be good to determine water and establish or have
+// generated patrol routes"). The bots' scan already flags water (its rays stop on a water surface: NAV_WATER); that is the
+// starting mask. Painting adds water where the scan missed it (at the "Water height"), erasing takes scan water away. Saved
+// to Thugbot_learned\<map>.water. The mask is drawn as a blue tint through a texture the scan's shaders read.
+let wUndo = [], wTex = null, stroke = null;
+const isLoop = pts => pts.length > 2 && Math.hypot(pts[0][0] - pts[pts.length - 1][0], pts[0][2] - pts[pts.length - 1][2]) < 15;
+const wIs = c => water.paint[c] === 1 || (water.paint[c] === 0 && water.auto[c] === 1);
+const wH = c => water.paint[c] === 1 ? water.paintH[c] : water.autoH[c];
+async function loadWater(map) {
+    water = null; groups.water.clear(); wUndo = []; $('wCount').textContent = '';
+    if (cloudMat) cloudMat.uniforms.wOn.value = 0;
+    let buf; try { const r = await fetch('/api/water?map=' + map); if (!r.ok) throw new Error(await r.text()); buf = await r.arrayBuffer(); } catch (e) { $('wCount').textContent = '(no water data)'; return; }
+    const jl = new DataView(buf).getUint32(0, true), wm = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, jl)));
+    const cells = wm.w * wm.h, auto = new Uint8Array(buf.slice(4 + jl, 4 + jl + cells)), off = 4 + jl + cells + (4 - cells % 4) % 4;
+    const hs = new Float32Array(buf.slice(off, off + wm.count * 4)), autoH = new Float32Array(cells).fill(NaN);
+    for (let c = 0, k = 0; c < cells; c++) if (auto[c]) autoH[c] = hs[k++];
+    PatrolGen.filterCovered(auto, autoH, wm.w, wm.h, wm.cell);   // (sea level under hillsides is not water)
+    water = { ...wm, auto, autoH, paint: new Uint8Array(cells), paintH: new Float32Array(cells), base: meta.ymin - 100 };
+    for (const [y, cz, a, b] of wm.painted.add) for (let cx = a; cx <= b; cx++) { const c = cz * wm.w + cx; water.paint[c] = 1; water.paintH[c] = y; }
+    for (const [cz, a, b] of wm.painted.erase) for (let cx = a; cx <= b; cx++) if (auto[cz * wm.w + cx]) water.paint[cz * wm.w + cx] = 2;
+    if (wm.painted.stale) msg('The painted water was made on an older scan of this map and was left out (the file is kept until you save).');
+    if (wTex) wTex.dispose();
+    wTex = new THREE.DataTexture(new Uint8Array(cells * 4), wm.w, wm.h, THREE.RGBAFormat); wTex.magFilter = wTex.minFilter = THREE.NearestFilter; wTex.generateMipmaps = false;
+    for (let c = 0; c < cells; c++) texCell(c);
+    wTex.needsUpdate = true;
+    const u = cloudMat.uniforms; u.wtex.value = wTex; u.wBase.value = water.base; u.wRect.value.set(wm.x0 - wm.cell / 2, wm.z0 - wm.cell / 2, wm.w * wm.cell, wm.h * wm.cell);
+    paintedPoints(); waterShow(); waterCount();
+}
+function texCell(c) {
+    const d = wTex.image.data, wv = wIs(c), q = wv ? Math.max(0, Math.min(65535, Math.round((wH(c) - water.base) * 50))) : 0;
+    d[c * 4] = wv ? 255 : 0; d[c * 4 + 1] = q >> 8; d[c * 4 + 2] = q & 255; d[c * 4 + 3] = water.paint[c] === 1 ? 2 : water.paint[c] === 2 ? 3 : wv ? 1 : 0;
+}
+function waterShow() { const on = $('sWmask').checked && !!water; if (cloudMat) cloudMat.uniforms.wOn.value = on ? 1 : 0; groups.water.visible = on; }
+$('sWmask').onchange = waterShow;
+function waterCount() {
+    if (!water) return; let n = 0, p = 0; for (let c = 0; c < water.auto.length; c++) { if (wIs(c)) n++; if (water.paint[c]) p++; }
+    $('wCount').textContent = `(${(n * water.cell * water.cell / 1e6).toFixed(2)} km²` + (p ? `, ${p} cells painted` : '') + ')';
+}
+// painted water where the scan has no surface to tint: blue points at the painted height
+function paintedPoints() {
+    groups.water.clear(); if (!water) return; const P = [];
+    for (let c = 0; c < water.paint.length; c++) if (water.paint[c] === 1) { const cz = Math.floor(c / water.w), cx = c - cz * water.w; P.push(water.x0 + cx * water.cell, water.paintH[c] + 0.15, -(water.z0 + cz * water.cell)); }
+    if (!P.length) return;
+    const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+    groups.water.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0x339af0, size: water.cell * 1.2, sizeAttenuation: true, transparent: true, opacity: 0.75 })));
+}
+function autoWaterHeight() {
+    const P = play || { x0: -1e9, x1: 1e9, z0: -1e9, z1: 1e9 }, hist = new Map();
+    for (let c = 0; c < water.auto.length; c += 3) {
+        if (!wIs(c)) continue; const cz = Math.floor(c / water.w), x = water.x0 + (c - cz * water.w) * water.cell, z = water.z0 + cz * water.cell;
+        if (x < P.x0 || x > P.x1 || z < P.z0 || z > P.z1) continue; const k = Math.round(wH(c) * 2) / 2; hist.set(k, (hist.get(k) || 0) + 1);
+    }
+    let best = null, bn = 0; hist.forEach((n, k) => { if (n > bn) { bn = n; best = k; } });
+    return best ?? Math.round(meta.ymin);
+}
+$('wAuto').onclick = () => { if (water) $('wHeight').value = autoWaterHeight(); };
+const setWSize = () => { $('wSizeV').textContent = $('wSize').value + ' m'; brushRing.scale.setScalar(+$('wSize').value); };
+const brushRing = new THREE.Mesh(new THREE.RingGeometry(0.93, 1, 48), new THREE.MeshBasicMaterial({ color: 0x74c0fc, side: THREE.DoubleSide, depthTest: false, transparent: true, opacity: 0.9 }));
+brushRing.rotation.x = -Math.PI / 2; brushRing.renderOrder = 8; groups.brush.add(brushRing); groups.brush.visible = false;
+$('wSize').oninput = setWSize; setWSize();
+// where the brush is: the scan surface under the cursor, or else the water height's plane
+function brushPoint(e) {
+    const p = pickSurface(e); if (p) return p;
+    const r = renderer.domElement.getBoundingClientRect(), ray = new THREE.Raycaster();
+    ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), camera);
+    const h = +$('wHeight').value || 0, o = ray.ray.origin, d = ray.ray.direction; if (Math.abs(d.y) < 1e-6) return null;
+    const t = (h - o.y) / d.y; return t > 0 ? [o.x + d.x * t, h, -(o.z + d.z * t)] : null;
+}
+function applyBrush(p) {
+    const W = water, mode = $('wMode').value, r = +$('wSize').value / W.cell, h = Math.round((+$('wHeight').value || 0) * 10) / 10;
+    const cx0 = Math.round((p[0] - W.x0) / W.cell), cz0 = Math.round((p[2] - W.z0) / W.cell), R = Math.ceil(r); let changed = 0;
+    for (let dz = -R; dz <= R; dz++) for (let dx = -R; dx <= R; dx++) {
+        if (dx * dx + dz * dz > r * r) continue; const cx = cx0 + dx, cz = cz0 + dz; if (cx < 0 || cz < 0 || cx >= W.w || cz >= W.h) continue;
+        const c = cz * W.w + cx, old = W.paint[c], oldH = W.paintH[c]; let nv = 0, nh = oldH;
+        if (mode === 'add') { if (!(W.auto[c] && Math.abs(W.autoH[c] - h) < 3)) { nv = 1; nh = h; } }   // (scan water at that height already: left as scanned)
+        else if (mode === 'erase') nv = W.auto[c] ? 2 : 0;
+        if (nv === old && nh === oldH) continue;
+        if (!stroke.seen.has(c)) { stroke.seen.add(c); stroke.c.push(c); stroke.v.push(old); stroke.h.push(oldH); }
+        W.paint[c] = nv; W.paintH[c] = nh; texCell(c); changed++;
+    }
+    if (changed) wTex.needsUpdate = true;
+}
+renderer.domElement.addEventListener('pointerdown', e => {
+    if (tool !== 'water' || e.button !== 0 || !meta || !water) return;
+    if (e.shiftKey) { const p = pickSurface(e); if (p) { $('wHeight').value = Math.round(p[1] * 2) / 2; msg(`Water height ${$('wHeight').value} m (from the surface clicked).`); } return; }
+    const p = brushPoint(e); if (!p) return;
+    stroke = { c: [], v: [], h: [], seen: new Set() }; renderer.domElement.setPointerCapture(e.pointerId); applyBrush(p);
+});
+renderer.domElement.addEventListener('pointermove', e => {
+    if (tool !== 'water' || !meta || !water) return;
+    const p = brushPoint(e); if (!p) return;
+    brushRing.position.copy(T(p, 0.6));
+    if (stroke) applyBrush(p);
+});
+const endStroke = () => {
+    if (!stroke) return; const s = stroke; stroke = null;
+    if (!s.c.length) return; delete s.seen; wUndo.push(s); if (wUndo.length > 40) wUndo.shift();
+    dirty.water = true; paintedPoints(); waterCount(); updateUI();
+};
+renderer.domElement.addEventListener('pointerup', endStroke); renderer.domElement.addEventListener('pointercancel', endStroke);
+function waterUndo() {
+    const s = wUndo.pop(); if (!s) return;
+    for (let k = s.c.length - 1; k >= 0; k--) { const c = s.c[k]; water.paint[c] = s.v[k]; water.paintH[c] = s.h[k]; texCell(c); }
+    wTex.needsUpdate = true; dirty.water = true; paintedPoints(); waterCount(); updateUI(); msg('Water stroke undone.');
+}
+$('wClear').onclick = () => {
+    if (!water) return; const s = { c: [], v: [], h: [] };
+    for (let c = 0; c < water.paint.length; c++) if (water.paint[c]) { s.c.push(c); s.v.push(water.paint[c]); s.h.push(water.paintH[c]); water.paint[c] = 0; texCell(c); }
+    if (!s.c.length) return msg('Nothing painted on this map.');
+    wUndo.push(s); wTex.needsUpdate = true; dirty.water = true; paintedPoints(); waterCount(); updateUI(); msg('Painting cleared - the scan\'s own water only. Ctrl+Z (with Paint water on) brings it back.');
+};
+// the painting as runs per row, for the file
+function waterRuns() {
+    const W = water, add = [], erase = [];
+    for (let cz = 0; cz < W.h; cz++) {
+        let cx = 0;
+        while (cx < W.w) {
+            const c = cz * W.w + cx, v = W.paint[c]; if (!v) { cx++; continue; }
+            const y = Math.round(W.paintH[c] * 10) / 10; let e = cx;
+            while (e + 1 < W.w && W.paint[c + e + 1 - cx] === v && (v === 2 || Math.round(W.paintH[c + e + 1 - cx] * 10) / 10 === y)) e++;
+            if (v === 1) add.push([y, cz, cx, e]); else erase.push([cz, cx, e]);
+            cx = e + 1;
+        }
+    }
+    return { add, erase };
+}
+
+// ---- boat patrols from the water mask: patrolgen.js (shared with make-boat-patrols.js)
+function generatePatrols() {
+    if (!water) return { out: [], notes: ['No water data for this map.'] };
+    return PatrolGen.generate({ w: water.w, h: water.h, x0: water.x0, z0: water.z0, cell: water.cell, isWater: wIs, height: wH },
+        { play, flags: data.flags, vehicles: data.vehicles || [], clear: +$('gClear').value || 14, loop: $('gLoop').checked, launch: $('gLaunch').checked, maxPts: limits.boatPts });
+}
+$('gen').onclick = () => {
+    if (!meta) return; $('genMsg').textContent = 'Working…';
+    setTimeout(() => {
+        const t0 = performance.now(), { out, notes } = generatePatrols();
+        if (!out.length) { $('genMsg').textContent = notes.join(' '); return; }
+        const old = routes.filter(r => r.type === 'boat').length;
+        snapshot();
+        if (old && confirm(`Replace the ${old} boat patrol route(s) already on this map? (Cancel adds the new ones beside them.)`)) { routes.forEach(r => { if (r.type === 'boat' && r.obj) groups.routes.remove(r.obj); }); routes = routes.filter(r => r.type !== 'boat'); }
+        out.forEach(r => routes.push(r)); touch('boat'); $('rboat').checked = true; sel = pick = -1; rebuildRoutes(); updateUI();
+        $('genMsg').textContent = notes.join(' ') + ` (${Math.round(performance.now() - t0)} ms) Check them, then Save routes.`;
+        msg('Boat patrols generated (pink). Select one to move, delete or reverse it.');
+    }, 20);
+};
 
 // ---- buttons / keys
 function delPoint() { const r = routes[sel]; if (sel < 0 || pick < 0) return msg('Pick a waypoint first.'); if (r.pts.length <= 2) return msg('A route needs 2 waypoints; delete the route instead.'); snapshot(); r.pts.splice(pick, 1); delete r.len; pick = Math.min(pick, r.pts.length - 1); touch(r.type); routeLine(r, sel); handles(); updateUI(); }
 function delRoute() { if (sel < 0) return; snapshot(); const r = routes[sel]; groups.routes.remove(r.obj); routes.splice(sel, 1); touch(r.type); sel = pick = -1; rebuildRoutes(); updateUI(); msg('Route deleted (Ctrl+Z brings it back).'); }
 function doUndo() {
+    if (tool === 'water' && wUndo.length) return waterUndo();
     if (drawing && drawing.pts.length) { drawing.pts.pop(); routeLine(drawing, -2); handles(); updateUI(); return; }
     const s = undo.pop(); if (!s) return msg('Nothing to undo.');
     routes.forEach(r => r.obj && groups.routes.remove(r.obj)); const o = JSON.parse(s); routes = o.routes; if (o.exits) data.exits = o.exits; sel = o.sel; pick = -1; dirty = o.dirty; buildExits(); rebuildRoutes(); updateUI();
 }
 function cancel() { if (drawing) { if (drawing.obj) groups.routes.remove(drawing.obj); drawing = null; handles(); } pick = -1; handles(); updateUI(); }
 $('tSel').onclick = () => { cancel(); tool = 'sel'; updateUI(); };
+$('tWater').onclick = () => { cancel(); tool = 'water'; sel = pick = -1; $('sWmask').checked = true; waterShow(); rebuildRoutes(); updateUI(); msg('Left-drag paints / erases water (brush settings under "Water & boat patrols"). Right-drag pans, Shift+click takes the height under the cursor.'); };
 $('tExit').onclick = () => { cancel(); tool = 'exit'; sel = pick = -1; $('sExits').checked = true; groups.exits.visible = true; rebuildRoutes(); updateUI(); msg('Click the ground at a ramp or stairs out of the water to add an exit, click an exit to remove it.'); };
 $('tDraw').onclick = () => { tool = 'draw'; sel = pick = -1; rebuildRoutes(); updateUI(); msg('Click the ground to place waypoints, Enter or "Finish route" when done.'); };
 $('branch').onclick = () => {
@@ -500,7 +720,7 @@ $('rev').onclick = () => { if (sel < 0) return; snapshot(); const r = routes[sel
 const sw = c => '<span class="sw" style="background:' + c + '"></span> ';
 function legend() {
     const m = +$('cmode').value; if (cloudMat) cloudMat.uniforms.mode.value = m;
-    $('legend').innerHTML = (m === 3 ? "The map's own top-down image, from your game files. Roads show as they do in game." : m === 0 ? sw('#4dc75c') + 'flat (under 6°) ' + sw('#f2d940') + 'gentle slope / stairs ' + sw('#ff8c26') + 'steep ' + sw('#f23333') + 'very steep / ledge (35°+). Brighter = higher up.'
+    $('legend').innerHTML = (m === 4 ? sw('#494f54') + 'road surface ' + sw('#8f8c82') + 'floor ' + sw('#424341') + 'underside' : m === 3 ? 'Top-down map image from your local game files.' : m === 0 ? sw('#4dc75c') + 'flat (under 6°) ' + sw('#f2d940') + 'gentle slope / stairs ' + sw('#ff8c26') + 'steep ' + sw('#f23333') + 'very steep / ledge (35°+). Brighter = higher up.'
         : m === 1 ? sw('#00b3ff') + 'low ' + sw('#40ff80') + sw('#ffe040') + sw('#ff3020') + 'high (within the play area)' : 'Grey, brighter = higher up.')
         + '<br>' + sw('#14337f') + 'water ' + sw('#c47a52') + 'walls / blocked edges';
 }
@@ -530,23 +750,161 @@ addEventListener('keydown', e => {
 });
 $('save').onclick = async () => {
     const strip = t => routes.filter(r => r.type === t).map(({ obj, type, ...r }) => r);
-    const body = {}; for (const t of ['learn', 'veh', 'planned']) if (dirty[t]) body[t] = strip(t); if (dirty.exits) body.exits = data.exits;
+    const body = {}; for (const t of ['learn', 'veh', 'planned', 'boat']) if (dirty[t]) body[t] = strip(t); if (dirty.exits) body.exits = data.exits;
+    if (dirty.water && water) body.water = waterRuns();
     $('save').disabled = true; msg('Saving…');
     const res = await (await fetch('/api/routes?map=' + meta.map, { method: 'POST', body: JSON.stringify(body) })).json();
-    if (res.ok) { dirty = { learn: false, veh: false, planned: false, exits: false }; msg('Saved: ' + res.done.join(', ') + '. Bots pick them up when the map next loads.'); } else msg('Save failed: ' + res.error);
+    if (res.ok) { dirty = CLEAN(); msg('Saved: ' + res.done.join(', ') + '. Bots pick them up when the map next loads.'); } else msg('Save failed: ' + res.error);
     updateUI();
 };
 addEventListener('beforeunload', e => { if (Object.values(dirty).some(x => x)) e.preventDefault(); });
-const setCut = () => { if (!meta) return; const v = +$('cut').value; const y = v >= 1000 ? 1e9 : meta.ymin + (meta.ymax - meta.ymin + 2) * v / 1000; cloudMat.uniforms.cut.value = y; $('cutV').textContent = v >= 1000 ? 'off' : y.toFixed(0) + ' m'; };
-$('cut').oninput = setCut;
+const floorPlanes = [new THREE.Plane(new THREE.Vector3(0, 1, 0)), new THREE.Plane(new THREE.Vector3(0, -1, 0))];
+const setCut = () => {
+    if (!meta) return;
+    const v = +$('cut').value;
+    const slider = v >= 1000 ? 1e9 : meta.ymin + (meta.ymax - meta.ymin + 2) * v / 1000;
+    const low = $('floorMin').value ? +$('floorMin').value : -1e9;
+    const high = Math.min(slider, $('floorMax').value ? +$('floorMax').value : 1e9);
+    cloudMat.uniforms.low.value = low;
+    cloudMat.uniforms.cut.value = high;
+    floorPlanes[0].constant = -low;
+    floorPlanes[1].constant = high;
+    renderer.clippingPlanes = floorPlanes;
+    $('cutV').textContent = v >= 1000 ? 'off' : slider.toFixed(0) + ' m';
+};
+$('cut').oninput = $('floorMin').oninput = $('floorMax').oninput = setCut;
+$('floorReset').onclick = () => {
+    $('cut').value = 1000; $('floorMin').value = $('floorMax').value = ''; setCut();
+};
 $('psize').oninput = () => cloudMat && (cloudMat.uniforms.size.value = +$('psize').value);
 ['sFloor', 'sWater', 'sWall'].forEach(id => $(id).onchange = () => cloudMat && cloudMat.uniforms.show.value.set(+$('sFloor').checked, +$('sWater').checked, +$('sWall').checked));
 ['sFlags', 'sSpawns'].forEach(id => $(id).onchange = showMarks);
 $('sVehs').onchange = () => groups.vehs.visible = $('sVehs').checked; $('sVehNames').onchange = vehNames;
 $('sExits').onchange = () => groups.exits.visible = $('sExits').checked;
-['rlearn', 'rveh', 'rplanned'].forEach(id => $(id).onchange = rebuildRoutes);
+['rlearn', 'rveh', 'rplanned', 'rboat'].forEach(id => $(id).onchange = rebuildRoutes);
+
+let liveSnapshot = null, livePort = 0, selectedLiveBot = '', lastFollowPoint = null;
+const livePathMap = (p, lift = 0) => new THREE.Vector3(p[0], p[1] + lift, -p[2]);
+const liveTeamColor = team => team === 1 ? 0x55baff : team === 2 ? 0xff765f : 0xf1ca65;
+function clearLive() {
+    for (const obj of [...groups.live.children]) {
+        obj.geometry.dispose();
+        obj.material.dispose();
+        groups.live.remove(obj);
+    }
+}
+function renderLive(snapshot) {
+    const servers = $('liveServer');
+    const options = snapshot?.instances || [];
+    servers.hidden = options.length <= 1;
+    const existing = Array.from(servers.options).map(o => o.value + '|' + o.textContent);
+    const current = options.map(o => o.port + '|' + o.port + ' · ' + o.map);
+    if (JSON.stringify(existing) !== JSON.stringify(current)) {
+        servers.replaceChildren(...options.map(o => new Option(o.port + ' · ' + o.map, String(o.port))));
+    }
+    if (snapshot) servers.value = snapshot.port;
+    const available = snapshot && (snapshot.map === meta?.map || snapshot.round === meta?.map);
+    $('liveBot').hidden = !available;
+    $('liveMap').hidden = !snapshot || available || ![...$('map').options].some(o => o.value === snapshot.map || o.value === snapshot.round);
+    clearLive();
+    if (!available) {
+        lastFollowPoint = null;
+        $('liveStatus').textContent = snapshot ? 'Running map · ' + snapshot.map : 'Waiting for the Hardline server…';
+        return;
+    }
+    const bots = snapshot.bots || [];
+    const select = $('liveBot');
+    const entries = bots.map(b => [String(b.id), b.name]);
+    const old = Array.from(select.options).slice(1).map(o => [o.value, o.textContent]);
+    if (JSON.stringify(entries) !== JSON.stringify(old)) {
+        select.replaceChildren(new Option('Follow a bot', ''), ...entries.map(([id, name]) => new Option(name, id)));
+        select.value = selectedLiveBot;
+    }
+    const tracked = bots.find(b => String(b.id) === selectedLiveBot);
+    $('liveStatus').textContent = tracked ? [tracked.state, tracked.vehicle, Number.isInteger(tracked.flag) && tracked.flag >= 0 ? 'Flag ' + String.fromCharCode(65 + tracked.flag) : ''].filter(Boolean).join(' · ') :
+        bots.length + ' bots · ' + snapshot.vehicles.length + ' vehicles';
+    const marker = (p, color, radius, height, opacity = 1, tracked = false) => {
+        const dot = new THREE.Mesh(new THREE.SphereGeometry(radius, 8, 5),
+            new THREE.MeshBasicMaterial({ color, opacity, transparent: opacity < 1, depthTest: !tracked }));
+        if (tracked) dot.renderOrder = 12;
+        dot.position.copy(livePathMap(p, height));
+        dot.scale.y = 0.8;
+        groups.live.add(dot);
+    };
+    for (const v of snapshot.vehicles) marker(v.p, v.occupied ? 0xefa83a : 0xc4a46c, 1.7, 1.55, 0.75);
+    for (const f of snapshot.flags) marker(f.p, liveTeamColor(f.team), 1.8, 2.0);
+    for (const b of bots) marker(b.p, liveTeamColor(b.team), b === tracked ? 1.55 : 0.9, b.vehicle ? 2.35 : 1.4, 1, b === tracked);
+    if (tracked) {
+        const p = livePathMap(tracked.p, 1.4);
+        if (lastFollowPoint) {
+            const shift = p.clone().sub(lastFollowPoint);
+            camera.position.add(shift);
+            controls.target.add(shift);
+        } else {
+            controls.target.copy(p);
+            camera.position.copy(p).add(new THREE.Vector3(16, 15, 19));
+        }
+        lastFollowPoint = p;
+        if (tracked.path.length) {
+            const pts = [p, ...tracked.path.map(q => livePathMap(q, 0.5))];
+            groups.live.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),
+                new THREE.LineBasicMaterial({ color: 0xffffff })));
+        }
+    } else lastFollowPoint = null;
+}
+let liveTimer = 0, liveGeneration = 0;
+async function pollLive(generation) {
+    try {
+        const res = await fetch('/api/live?port=' + livePort, { signal: AbortSignal.timeout(5000) });
+        const result = res.ok ? await res.json() : null;
+        if (generation !== liveGeneration) return;
+        liveSnapshot = result;
+        renderLive(liveSnapshot);
+    } catch (err) {
+        if (generation !== liveGeneration) return;
+        liveSnapshot = null;
+        renderLive(null);
+    }
+    if (generation === liveGeneration) liveTimer = setTimeout(() => pollLive(generation), 1250);
+}
+$('liveOn').onchange = () => {
+    clearTimeout(liveTimer);
+    liveGeneration++;
+    liveSnapshot = null;
+    selectedLiveBot = '';
+    lastFollowPoint = null;
+    $('liveBot').value = '';
+    clearLive();
+    if ($('liveOn').checked) pollLive(liveGeneration);
+    else {
+        $('liveBot').hidden = $('liveMap').hidden = $('liveServer').hidden = true;
+        $('liveStatus').textContent = '';
+    }
+};
+$('liveServer').onchange = () => {
+    livePort = +$('liveServer').value;
+    selectedLiveBot = '';
+    lastFollowPoint = null;
+    $('liveBot').value = '';
+    clearTimeout(liveTimer);
+    pollLive(++liveGeneration);
+};
+$('liveBot').onchange = () => {
+    selectedLiveBot = $('liveBot').value;
+    lastFollowPoint = null;
+    renderLive(liveSnapshot);
+};
+$('liveMap').onclick = () => {
+    if (!liveSnapshot) return;
+    $('map').value = [...$('map').options].some(o => o.value === liveSnapshot.map) ? liveSnapshot.map : liveSnapshot.round;
+    loadMap($('map').value).catch(err => msg(err.message));
+};
 
 (function loop() { requestAnimationFrame(loop); fly(); controls.update(); if (cloudMat) cloudMat.uniforms.scale.value = renderer.domElement.height / 2 / Math.tan(camera.fov * Math.PI / 360); renderer.render(scene, camera); })();
-loadMap($('map').value);
+loadMap($('map').value).catch(err => { $('load').style.display = 'none'; msg(err.message); });
+if (new URLSearchParams(location.search).get('live') === '1') {
+    $('liveOn').checked = true;
+    $('liveOn').onchange();
+}
 </script>
 </body></html>

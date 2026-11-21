@@ -14,7 +14,7 @@
 // Returns 1 when it set b->target (and b->targetFlag: flag index, or -1).
 
 typedef struct FlagInfo { int ok, owner; float pos[3], radius; int enemies[3], friends[3], attackers[3]; } FlagInfo;
-// In the capture area: within scale x its radius across and on its floor (FloodBots)
+// In the capture area: within scale x its radius across and on its floor (earlier development code)
 static int in_area(const float *pos, const FlagInfo *fi, float scale) { return dist2d(pos, fi->pos) < fi->radius * scale && fabsf(pos[1] - fi->pos[1]) < 8; }
 static FlagInfo g_fi[MAX_CPS];
 static unsigned g_fiFrame = ~0u;
@@ -76,6 +76,79 @@ static void flags_survey(void)
     }
 }
 
+// Squads (2026-11-16, ported from earlier development code). A player's squad id is what RCON listPlayers prints as "squadId" (RVA
+// 0x235910): the virtual at +0x38 of the player's spawn extent, player + [image + RVA_EXTENT_OFFSET] (also read by the
+// order handler 0x436280: team * 33 + squad is the squad key). 0 = no squad. At the first use the getter is read: a plain
+// "mov eax, [rcx + X]; ret" gives the field (read directly from then on), anything else is called.
+// "squads" lists them; "squadplay 0" turns squad play off (each bot picks its own flag / lane / car again).
+static int g_squadPlay = 1, g_squadOff = -1;   // -1: not looked at yet, 0: call the getter, else the field's offset in the extent
+static uintptr_t g_squadGetter;
+static int player_squad(void *pl)
+{
+    if (!pl) return 0;
+    unsigned g = rd_ok((void *)(H->image + RVA_EXTENT_OFFSET), 4) ? *(unsigned *)(H->image + RVA_EXTENT_OFFSET) : 0;
+    if (!g || g > 0x10000) return 0;   // (set at start-up)
+    char *ext = (char *)pl + g;
+    if (!rd_ok(ext, 8)) return 0;
+    if (g_squadOff < 0) {
+        uintptr_t *vt = *(uintptr_t **)ext;
+        if (!rd_ok(vt, 0x40) || !rd_ok((void *)vt[7], 8)) return 0;
+        const unsigned char *c = (const unsigned char *)vt[7];
+        g_squadGetter = vt[7];
+        if (c[0] == 0x8B && c[1] == 0x81 && c[6] == 0xC3) g_squadOff = *(int *)(c + 2);
+        else if (c[0] == 0x8B && c[1] == 0x41 && c[3] == 0xC3) g_squadOff = c[2];
+        else g_squadOff = 0;
+        H->log("squads: extent at player +%#x, squad getter RVA %#llx (%02x %02x %02x %02x %02x %02x %02x) - %s +%#x", g, (unsigned long long)(g_squadGetter - H->image),
+               c[0], c[1], c[2], c[3], c[4], c[5], c[6], g_squadOff ? "reads the field at extent" : "called (not a plain field read)", g_squadOff);
+    }
+    int s = 0;
+    if (g_squadOff > 0) { if (!rd_ok(ext + g_squadOff, 4)) return 0; s = *(int *)(ext + g_squadOff); }
+    else {
+        __try {
+            uintptr_t *vt = *(uintptr_t **)ext;
+            if (vt[7] != g_squadGetter) return 0;   // (not that class: no extent here)
+            s = ((int (*)(void *))g_squadGetter)(ext);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { s = 0; }
+    }
+    return s > 0 && s < 64 ? s : 0;
+}
+static void squads_dump(void)
+{
+    for (int team = 1; team <= 2; team++) {
+        char line[900]; int n = snprintf(line, sizeof line, "squads: team %d -", team), none = 0;
+        for (int s = 1; s < 64 && n < 820; s++) {
+            int any = 0;
+            for (int j = 0; j < g_playerCount && n < 820; j++) {
+                void *p = g_players[j];
+                if (!p || FIELD(p, OFF_PLAYER_TEAM, int) != team || player_squad(p) != s) continue;
+                n += snprintf(line + n, sizeof line - n, "%s%s%s", any ? ", " : " [", (char *)p + OFF_PLAYER_NAME, is_bot_player(p) ? "" : "*"); any = 1;
+            }
+            if (any) n += snprintf(line + n, sizeof line - n, "]");
+        }
+        for (int j = 0; j < g_playerCount; j++) if (g_players[j] && FIELD(g_players[j], OFF_PLAYER_TEAM, int) == team && !player_squad(g_players[j])) none++;
+        H->log("%s; %d without a squad (* = human)%s", line, none, g_squadPlay ? "" : " - squadplay off");
+    }
+}
+// The squad's leader among the bots: its lowest-numbered live bot (the one the rest follow). -1: none / no squad.
+static int squad_leader(int i)
+{
+    if (!g_squadPlay) return -1;
+    int sq = player_squad(H->bots[i]); if (!sq) return -1;
+    int team = FIELD(H->bots[i], OFF_PLAYER_TEAM, int);
+    for (int o = 0; o < H->botCount; o++) {
+        if (!H->bots[o] || !bot_soldier_raw(H->bots[o]) || FIELD(H->bots[o], OFF_PLAYER_TEAM, int) != team || player_squad(H->bots[o]) != sq) continue;
+        return o;
+    }
+    return -1;
+}
+// Route variants are picked with a per-bot seed; squad mates share one, so they take the same lane.
+static unsigned route_seed(int i, Bot *b)
+{
+    int sq = g_squadPlay ? player_squad(H->bots[i]) : 0;
+    if (!sq) return b->seed;
+    return 0x9e3779b9u * (unsigned)(FIELD(H->bots[i], OFF_PLAYER_TEAM, int) * 64 + sq);
+}
+
 static int team_size(int team)
 {
     int n = 0;
@@ -127,6 +200,7 @@ static void flag_mill(Bot *b, int f, ULONGLONG t, float spread)
     b->targetFlag = f;
 }
 
+static int flag_has_routes(const float *fp);   // human_routes.inc
 // Flanking: a third of the bots (by seed) attacking a flag over 70 m away first go to a point 35 m to the side of the
 // straight line (halfway along, side by seed) - on the grid and not much further from the flag - then on to the flag.
 static void flank_target(Bot *b, int f, const float *pos)
@@ -138,6 +212,9 @@ static void flank_target(Bot *b, int f, const float *pos)
         b->flankFlag = f + 1; b->flankUntil = 0;
         float dx = fp[0] - pos[0], dz = fp[2] - pos[2], d = sqrtf(dx * dx + dz * dz);
         if (d < 70 || !g_nav || g_navBuilding) return;
+        // (the tester 2026-11-15: "make sure bots always stick to routes") the flank point is a grid walk - no route ends there. A flag
+        // that routes reach (the saved routes have left / right flank versions already) is walked to by those routes.
+        if (flag_has_routes(fp)) { static unsigned fl; if (fl++ < 20) H->log("route: %s skips the flank point - flag %d has routes", (char *)b->player + OFF_PLAYER_NAME, f); return; }
         float side = (b->seed & 8) ? 1.0f : -1.0f, mx = pos[0] + dx * 0.55f, mz = pos[2] + dz * 0.55f;
         float px = mx - dz / d * 35 * side, pz = mz + dx / d * 35 * side, out[3];
         if (!nav_snap(g_nav, px, pos[1], pz, out) && !nav_snap(g_nav, px, NAN, pz, out)) return;
@@ -148,14 +225,42 @@ static void flank_target(Bot *b, int f, const float *pos)
     memcpy(b->target, b->flank, 12);
 }
 
+static int player_present(void *player);
+static struct SquadFlagRequest {
+    int flag;
+    void *by;
+    ULONGLONG until;
+    char level[96];
+} g_squadFlag[3][64];
+
+static int ordered_flag(Bot *b, int team, const float *pos, ULONGLONG t)
+{
+    if (!g_ordersOn || !g_squadPlay || team < 1 || team > 2) return 0;
+    int squad = player_squad(b->player);
+    if (!squad) return 0;
+    struct SquadFlagRequest *order = &g_squadFlag[team][squad];
+    if (!order->by || t >= order->until || strcmp(order->level, g_levelKey) ||
+        !player_present(order->by) || FIELD(order->by, OFF_PLAYER_TEAM, int) != team ||
+        player_squad(order->by) != squad) return 0;
+    int flag = order->flag;
+    if (flag < 0 || flag >= g_cpCount || !g_fi[flag].ok) return 0;
+    if (in_area(pos, &g_fi[flag], 0.7f)) flag_mill(b, flag, t, 0.55f);
+    else {
+        if (b->targetFlag != flag) b->npts = 0;
+        b->targetFlag = flag;
+        memcpy(b->target, g_fi[flag].pos, 12);
+    }
+    return 1;
+}
+
 static int objective_flags(int i, Bot *b, int team, const float *pos)
 {
-    (void)i;
     ULONGLONG t = now_ms();
     flags_survey();
     int owned = 0, total = 0;
     for (int f = 0; f < g_cpCount; f++) if (g_fi[f].ok) { total++; owned += g_fi[f].owner == team; }
     if (!total) return 0;
+    if (ordered_flag(b, team, pos, t)) return 1;
 
     // Defend: the owned flag under most threat (ties: nearest).
     if (owned && owned < total && is_defender(b)) {
@@ -205,8 +310,19 @@ static int objective_flags(int i, Bot *b, int team, const float *pos)
         { ULONGLONG sp = b->spawnAt; if (sp && t - sp < 1500) b->attackChooseAt = 0; }   // (respawned: chooses from where it is now)
         if (cur >= 0 && t < b->attackChooseAt && !target_dead(g_fi[cur].pos)) best = cur;
         else if (best >= 0) b->attackChooseAt = t + 45000 + (b->seed % 15000);
-        // (FloodBots) in its capture area and not ours yet: it stays, whatever another flag scores
+        // (earlier development code) in its capture area and not ours yet: it stays, whatever another flag scores
         if (cur >= 0 && in_area(pos, &g_fi[cur], 1.0f) && g_fi[cur].owner != team) best = cur;
+        {   // (2026-11-16) squad play: the squad goes for its leader's flag (unless this bot is in another flag's area, taking it)
+            int ld = squad_leader(i);
+            if (ld >= 0 && ld != i && g_bot[ld].attackFlag > 0) {
+                int lf = g_bot[ld].attackFlag - 1;
+                int taking = cur >= 0 && in_area(pos, &g_fi[cur], 1.0f) && g_fi[cur].owner != team;
+                if (lf < g_cpCount && g_fi[lf].ok && g_fi[lf].owner != team && !taking && lf != best) {
+                    static unsigned sl; if (sl++ < 40) H->log("squad: %s follows its squad leader %s to flag %d (had flag %d)", (char *)b->player + OFF_PLAYER_NAME, (char *)H->bots[ld] + OFF_PLAYER_NAME, lf, best);
+                    best = lf; b->attackChooseAt = g_bot[ld].attackChooseAt;
+                }
+            }
+        }
         {   // how often bots really change flag, for the log
             static unsigned sw, swMade; static ULONGLONG swAt;
             if (cur >= 0 && best >= 0 && best != cur) sw++, swMade++;
@@ -269,7 +385,7 @@ static int objective_target(int i, Bot *b, int team, const float *pos)
     if (rescue_target(i, b, team, pos)) { b->objRoute = 1; return 1; }
     if (conquest_flags()) {
         flags_survey();
-        // (FloodBots) standing in the area of a flag that isn't ours: that is the one it attacks, no defend / camp job takes it away
+        // (earlier development code) standing in the area of a flag that isn't ours: that is the one it attacks, no defend / camp job takes it away
         for (int f = 0; f < g_cpCount; f++)
             if (g_fi[f].ok && g_fi[f].owner != team && in_area(pos, &g_fi[f], 1.0f)) { b->attackFlag = f + 1; return objective_flags(i, b, team, pos); }
         if (camp_target(i, b, team, pos)) return 1;

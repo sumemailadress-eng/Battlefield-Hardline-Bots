@@ -106,6 +106,13 @@ static void editor_command(const char *who, const char *text)
     void *pl = player_by_name(who);
     float g[3];
     int have = pl && player_ground(pl, g);
+    if (!strcmp(text, "!ammo") || !strcmp(text, "!medic") || !strcmp(text, "!repair")) {
+        if (g_ordersOn && pl && !is_bot_player(pl)) {
+            int kind = !strcmp(text, "!ammo") ? KIT_AMMO : !strcmp(text, "!medic") ? KIT_MED : KIT_REPAIR;
+            help_supply_call(pl, kind, now_ms());
+        }
+        return;
+    }
     if (!strncmp(text, "!wp", 3)) {
         if (!have) { say_to(who, "Thugbot: can't find where you are (alive?)"); return; }
         if (strcmp(g_ed.player, who)) { snprintf(g_ed.player, sizeof g_ed.player, "%s", who); g_ed.n = 0; }
@@ -138,8 +145,12 @@ static void editor_command(const char *who, const char *text)
         g_kickVeh = v; g_kickUntil = now_ms() + 8000;
         say_to(who, "Thugbot: everyone out of your %s", vehicle_name(v));
     }
+    else if (!strncmp(text, "!getin", 6)) {   // (2026-11-16) Get In!: teammate bots on foot nearby come and board your vehicle
+        if (!pl) { say_to(who, "Thugbot: can't find you"); return; }
+        getin_call(pl, now_ms(), 1);
+    }
     else if (!strncmp(text, "!routes", 7)) say_to(who, "Thugbot: %d saved route(s), %d learned from players; editing %d point(s)", g_routeN, g_learn ? g_learn->nRoutes : 0, g_ed.n);
-    else say_to(who, "Thugbot: !wp !rec !stop !undo !clear !save !vsave !delete !routes !lift !out");
+    else say_to(who, "Thugbot: !wp !rec !stop !undo !clear !save !vsave !delete !routes !lift !out !getin");
 }
 
 static void editor_tick(void)

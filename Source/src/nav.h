@@ -1,4 +1,4 @@
-﻿// Automatic navigation grid for BotMod: built from physics raycasts (no hand-placed markers), A* path planning.
+// Automatic navigation grid for BotMod: built from physics raycasts (no hand-placed markers), A* path planning.
 // Each 2D cell holds up to NAV_LAYERS stacked surfaces (e.g. bridge deck, road under it, basement), so bots can
 // walk under overpasses and through ground floors.
 #pragma once

@@ -1,46 +1,20 @@
 ThugBot patch notes
 ===================
 
-V0.4.10 (not play-tested yet)
------------------------------
-- Map check: a few seconds into a map the flags are compared with every map's saved flags; if the game ever reports the
-  wrong map name, the right map's data is used (seen on BF4 / FloodBots, not on Hardline so far).
-- Less lag: the grid is built in smaller slices (4 ms a frame) and gunners read their gun without a slow system call.
-
-V0.4.9 (not released yet)
--------------------------
-- On foot: a bot stuck for 12 s against a solid wall on its route now drops the routes that led it there: saved
-  routes through that spot are cut, learned routes through it are left alone for 10 minutes, and it plans again.
-  Doors, low walls, people and parked cars don't count. (From FloodBots.)
-
-V0.4.8 (2026-11-12)
--------------------
-Vehicles are still NOT officially supported and bots stay on foot by default (Vehicles=0). Not all of this has been
-play-tested yet.
-
-Driving on hand-made vehicle routes (the routes you record in game or draw on the 3D map)
-- T-junctions: a route that ends on the middle of another route is joined to it there, so drivers can turn off one
-  route onto the other at that point (0.4.8).
-- A driver that is already on a route (within 8 m of one of its points) finds its way along the route network,
-  junctions included, instead of planning off-road (0.4.8).
-- Smooth junction turns: near a corner (further out at speed) the driver aims 5 m down the next leg, so it turns on an
-  arc instead of switching too late (0.4.7).
-- Hand-made routes are trusted: on its own line a driver no longer stops for walls the ray check thinks are there.
-  More than 4 m off the line it still stops short of walls (0.4.7).
-- Fences and other breakable things are driven through (0.4.7).
-- Garages: with walls close on both sides a car backs out straight and lines up on the middle of the exit, instead of
-  turning while reversing and scraping the walls (0.4.5 - 0.4.8).
-
-Gunners and boarding
-- Helicopter gunners: when no gun is found the gun test runs again after 20 s, up to three times, instead of guessing
-  for as long as the bot sits there. The gun nearest the bot's aim is tried first (0.4.4).
-- A bot walking to a vehicle gets a fresh 12 s for each vehicle it tries (0.4.3).
-- A bot stuck next to a parked car no longer writes that spot off as a wall (0.4.3).
-
-Other
-- Start-MySQL-Safe.ps1: MySQL is started in its own window after checking its system tables (running it hidden
-  corrupted them).
-- Rollback-Update.bat and VERSION.txt added.
+V0.4.3 - Early Release
+----------------------
+- Vehicles slow before sharp forks, follow turns in route order, and check clearance before
+  joining another route or pulling out of a narrow parking space.
+- Downtown includes a connected vehicle network from both HQ areas to the main streets.
+- Downtown's rooftop elevators are restored. Bots approach the doors, stay in the cab during
+  travel, and clear the landing before resuming their route. Indoor route recovery checks the
+  floor and walkable space before moving.
+- The 3D editor shows textured roads and floors, overpass undersides, and a selectable floor
+  range. Live view shows the current match and lets you follow a bot and its active route.
+- Equipped bots answer Need Ammo, Need Medic and Need Repair. The bots use Hardline's own
+  faction-specific gadgets and also deploy ammo and first aid on their own.
+- In Turf War, Attack can direct bots in your squad to the flag you are aiming at.
+- Includes earlier fixes for boarding vehicles, garage exits, and server load during map scans.
 
 V0.4.2 early release (2026-11-07)
 ---------------------------------

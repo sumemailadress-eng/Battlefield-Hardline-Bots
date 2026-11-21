@@ -1,8 +1,8 @@
-// Thugbot 3D map (the FloodBots one, pointed at Thugbot's files): a local web page that shows a map's raycast scan (the
+// Thugbot 3D map: a local editor for the
 // bots' nav grid: every walkable surface, up to 12 floors per cell, plus walls / ledges worked out from the blocked links between cells) as a 3D point cloud, with
 // the routes the bots load drawn on top. Routes can be drawn, moved and deleted in the page and saved back into the
 // same files Thugbot reads at map load. Separate tool: it never touches the bot DLL or the running server.
-//   node server.js [serverFolder] [port]      then open http://localhost:8643/  (8642 is the FloodBots one)
+//   node server.js [serverFolder] [port]      then open http://localhost:8643/  (8642 is the route editor)
 // Files (in the server folder):
 //   Thugbot_nav\<map>.v8.nav           scan (read only)
 //   Thugbot_learned\<map>.v2.learn     "route\t<foot|ground|boat>\t<uses> <made>\tx,y,z x,y,z ..." (other lines kept)
@@ -11,6 +11,10 @@
 //   Thugbot_routes\<map>.v8.routes     "spawn ..." lines kept, "route <from> <to> <len> <n> x,y,z ..." spawn/flag routes
 //   Thugbot_report\<map>_*.html        flags and spawns (read only)
 // Every save first copies the old files to Thugbot_learned_backup_3d\.
+//   Thugbot_learned  \<map>.boatroutes  boat patrols (the tester 2026-11-15): "route ax ay az bx by bz n x y z ..." as .vroutes, but read
+//                                         only for boats (first point = last point: a loop). Cars never see them.
+//   Thugbot_learned  \<map>.water       water painted in the 3D map on top of the scan's own water (NAV_WATER cells):
+//                                         "grid x0 z0 cell w h", "w <y> <cz> <cx0> <cx1>" water at height y, "x <cz> <cx0> <cx1>" not water
 const http = require('http'), fs = require('fs'), path = require('path');
 const { findOverhead } = require('./overhead.js');   // bridges and beams
 
@@ -29,16 +33,26 @@ const BACKUP = path.join(SERVER, 'Thugbot_learned_backup_3d'), CACHE = path.join
 const L = 12, WALKABLE = 1, WATER = 2;
 const DIRS = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
 const FEATURES = { veh: true, exits: true };   // (the DLL reads <map>.vroutes and <map>.exits since 2026-11-05)
-const LIMITS = { learnRoutes: 160, learnPts: 240, vRoutes: 160, vPts: 256, pRoutes: 800, pPts: 128 };
+const LIMITS = { learnRoutes: 160, learnPts: 240, vRoutes: 160, vPts: 256, pRoutes: 800, pPts: 128, boatRoutes: 32, boatPts: 256 };
 
 const safeMap = m => /^[A-Za-z0-9_]+$/.test(m || '') ? m : null;
 
 // ---- the scan -> point cloud. kinds: 0 floor, 1 water, 2 wall / blocked edge
+function roadScan(map, w, h, x0, z0, cell) {
+    const text = read(path.join(LEARN, map + '.roadscan'));
+    if (!text) return [];
+    const [header, ...lines] = text.trim().split(/\r?\n/);
+    const dims = header.trim().split(/\s+/).map(Number);
+    if (dims[0] !== w || dims[1] !== h || Math.abs(dims[2] - x0) >= 0.01 ||
+        Math.abs(dims[3] - z0) >= 0.01 || Math.abs(dims[4] - cell) >= 0.01) return [];
+    return lines.filter(line => /^\s*\d+\s*$/.test(line)).map(Number).filter(k => k < w * h * L);
+}
+
 function buildCloud(map) {
     const file = path.join(NAV, map + '.v8.nav');
     const st = fs.statSync(file);
-    const cacheFile = path.join(CACHE, map + '.cloud6');   // (2: + slope per point, 3: walls down from roof edges, 4: + floor surface triangles)
-    try { const c = fs.statSync(cacheFile); if (c.mtimeMs > st.mtimeMs) return fs.readFileSync(cacheFile); } catch (e) {}
+    const cacheFile = path.join(CACHE, map + '.cloud7');   // (2: + slope per point, 3: walls down from roof edges, 4: + floor surface triangles)
+    try { const c = fs.statSync(cacheFile); if (c.mtimeMs > Math.max(st.mtimeMs, fs.statSync(path.join(LEARN, map + '.roadscan'), { throwIfNoEntry: false })?.mtimeMs || 0)) return fs.readFileSync(cacheFile); } catch (e) {}
     const buf = fs.readFileSync(file);
     const magic = buf.readUInt32LE(0);
     const x0 = buf.readFloatLE(36), z0 = buf.readFloatLE(40), cell = buf.readFloatLE(44);
@@ -50,9 +64,10 @@ function buildCloud(map) {
     // (the tester 2026-11-06: "bridges show no opening on the bottom") an edge with a drop drew a wall down to the floor below: right for
     // a building's face, but it closed bridges off. Bridges and beams get no wall down.
     const isOver = new Uint8Array(n); for (const it of findOverhead(file).items) for (const i of it.nodes) isOver[i] = 1;
-    const pos = [], kind = [], slope = []; const nodeIdx = new Int32Array(n).fill(-1);   // (floor node -> its point, for the surface)
+    const paved = new Set(roadScan(map, w, h, x0, z0, cell));
+    const pos = [], kind = [], slope = [], road = []; const nodeIdx = new Int32Array(n).fill(-1);   // (floor node -> its point, for the surface)
     let ymin = Infinity, ymax = -Infinity;
-    const put = (x, y, z, k, s = 0) => { pos.push(x, y, z); kind.push(k); slope.push(s); };
+    const put = (x, y, z, k, s = 0, r = 0) => { pos.push(x, y, z); kind.push(k); slope.push(s); road.push(r); };
     for (let cz = 0; cz < h; cz++) for (let cx = 0; cx < w; cx++) {
         const c = cz * w + cx, wx = x0 + cx * cell, wz = z0 + cz * cell;
         for (let l = 0; l < L; l++) {
@@ -70,7 +85,7 @@ function buildCloud(map) {
                 if (best !== null && best > steep) steep = best;
             }
             nodeIdx[node] = kind.length;
-            put(wx, y, wz, flags[node] & WATER ? 1 : 0, Math.min(90, Math.round(Math.atan(steep / cell) * 180 / Math.PI)));
+            put(wx, y, wz, flags[node] & WATER ? 1 : 0, Math.min(90, Math.round(Math.atan(steep / cell) * 180 / Math.PI)), paved.has(node) ? 1 : 0);
             if (flags[node] & WATER) continue;
             const wall = [null, null, null, null, null, null, null, null];
             for (let d = 0; d < 8; d += 2) {   // straight directions only
@@ -83,7 +98,10 @@ function buildCloud(map) {
                     const nc = (nz * w + nx) * L; let best = null;
                     for (let k = 0; k < L; k++) if (flags[nc + k] & WALKABLE) { const dh = height[nc + k] - y; if (best === null || Math.abs(dh) < Math.abs(best)) best = dh; }
                     if (best !== null && best < -1) {
-                        if (best > -2.5 || isOver[node]) continue;   // (a step down, or the side of a bridge: no wall)
+                        const connectedUnder = Array.from({ length: L }, (_, k) => c * L + k)
+                            .some(k => (flags[k] & WALKABLE) && (edges[k] & (1 << d)) &&
+                                height[k] < y - 2 && Math.abs(height[k] - (y + best)) < 1.25);
+                        if (best > -2.5 || isOver[node] || connectedUnder) continue;   // (a step down, or the side of a bridge: no wall)
                         let bottom = y + best;   // (the nearest neighbour floor is the highest one below)
                         for (let k = 0; k < L; k++) if (k !== l && (flags[c * L + k] & WALKABLE) && height[c * L + k] < y - 1 && height[c * L + k] > bottom) bottom = height[c * L + k];   // (only down to this cell's own next floor: each storey draws its own stretch)
                         lo = Math.max(bottom - y, -400); hi = -0.2;
@@ -111,20 +129,36 @@ function buildCloud(map) {
     // floor surface: each node joined to its linked neighbours at +x, +z and the diagonal into triangles, so ramps and
     // stairs show as slopes (points only show where the surface is)
     const idx = [];
-    const near = (cx2, cz2, y, maxDh) => { if (cx2 >= w || cz2 >= h) return -1; const nc = (cz2 * w + cx2) * L; let bestK = -1, bd = maxDh; for (let k = 0; k < L; k++) if (nodeIdx[nc + k] >= 0) { const dh = Math.abs(height[nc + k] - y); if (dh < bd) { bd = dh; bestK = nc + k; } } return bestK; };
+    const neighbor = (node, cx, cz, dir, maxDh) => {
+        if (!(edges[node] & (1 << dir)) && !(flags[node] & WATER)) return -1;
+        const cellStart = (cz * w + cx) * L;
+        let best = -1, delta = maxDh;
+        for (let k = cellStart; k < cellStart + L; k++) {
+            if (nodeIdx[k] < 0 || (flags[k] & WATER) !== (flags[node] & WATER)) continue;
+            if (!(flags[node] & WATER) && !(edges[k] & (1 << ((dir + 4) % 8)))) continue;
+            const dy = Math.abs(height[k] - height[node]);
+            if (dy < delta) { delta = dy; best = k; }
+        }
+        return best;
+    };
     for (let cz = 0; cz < h - 1; cz++) for (let cx = 0; cx < w - 1; cx++) for (let l = 0; l < L; l++) {
-        const a = (cz * w + cx) * L + l; if (nodeIdx[a] < 0) continue; const y = height[a];
-        const B = edges[a] & 1 || flags[a] & WATER ? near(cx + 1, cz, y, 2.5) : -1, C = edges[a] & 4 || flags[a] & WATER ? near(cx, cz + 1, y, 2.5) : -1, D = near(cx + 1, cz + 1, y, 3.5);
-        const A = nodeIdx[a], b = B >= 0 ? nodeIdx[B] : -1, c = C >= 0 ? nodeIdx[C] : -1, d = D >= 0 ? nodeIdx[D] : -1;
-        if (b >= 0 && c >= 0 && d >= 0) idx.push(A, b, d, A, d, c);
-        else if (b >= 0 && d >= 0) idx.push(A, b, d);
-        else if (c >= 0 && d >= 0) idx.push(A, d, c);
-        else if (b >= 0 && c >= 0) idx.push(A, b, c);
+        const a = (cz * w + cx) * L + l;
+        if (nodeIdx[a] < 0) continue;
+        const b = neighbor(a, cx + 1, cz, 0, 1.6), c = neighbor(a, cx, cz + 1, 2, 1.6);
+        const fromB = b >= 0 ? neighbor(b, cx + 1, cz + 1, 2, 1.6) : -1;
+        const fromC = c >= 0 ? neighbor(c, cx + 1, cz + 1, 0, 1.6) : -1;
+        const A = nodeIdx[a];
+        if (fromB >= 0 && Math.abs(height[a] - height[fromB]) < 2.2)
+            idx.push(A, nodeIdx[b], nodeIdx[fromB]);
+        if (fromC >= 0 && Math.abs(height[a] - height[fromC]) < 2.2)
+            idx.push(A, nodeIdx[fromC], nodeIdx[c]);
+        if (fromB < 0 && fromC < 0 && b >= 0 && c >= 0 &&
+            neighbor(b, cx, cz + 1, 3, 1.6) === c) idx.push(A, nodeIdx[b], nodeIdx[c]);
     }
     const meta = { map, x0, z0, cell, w, h, count: kind.length, tris: idx.length, ymin, ymax, file: path.basename(file) };
     const j = Buffer.from(JSON.stringify(meta)); const pad = (4 - ((4 + j.length) % 4)) % 4;
     const head = Buffer.alloc(4); head.writeUInt32LE(j.length + pad);
-    const out = Buffer.concat([head, j, Buffer.alloc(pad, 32), Buffer.from(new Float32Array(pos).buffer), Buffer.from(new Uint8Array(kind).buffer), Buffer.from(new Uint8Array(slope).buffer), Buffer.alloc((4 - (kind.length * 2) % 4) % 4), Buffer.from(new Uint32Array(idx).buffer)]);
+    const out = Buffer.concat([head, j, Buffer.alloc(pad, 32), Buffer.from(new Float32Array(pos).buffer), Buffer.from(new Uint8Array(kind).buffer), Buffer.from(new Uint8Array(slope).buffer), Buffer.from(new Uint8Array(road).buffer), Buffer.alloc((4 - (kind.length * 3) % 4) % 4), Buffer.from(new Uint32Array(idx).buffer)]);
     try { fs.mkdirSync(CACHE, { recursive: true }); fs.writeFileSync(cacheFile, out); } catch (e) {}
     return out;
 }
@@ -134,6 +168,70 @@ const read = f => { try { return fs.readFileSync(f, 'utf8'); } catch (e) { retur
 const exitsFile = m => path.join(LEARN, m + '.exits');
 const vehiclesFile = m => path.join(LEARN, m + '.vehicles');   // where vehicles stood at round start, written by the bots: "veh <name> x y z yaw <rounds seen>" (read only)
 const learnFile = m => path.join(LEARN, m + '.v2.learn'), vFile = m => path.join(LEARN, m + '.vroutes'), pFile = m => path.join(ROUTES, m + '.v8.routes');
+const boatFile = m => path.join(LEARN, m + '.boatroutes'), waterFile = m => path.join(LEARN, m + '.water');
+// "route ax ay az bx by bz n x y z ..." lines (.vroutes / .boatroutes) -> [{ pts, fb }]
+function readRouteLines(t) {
+    const out = [];
+    if (t) for (const l of t.split(/\r?\n/)) {
+        if (!l.startsWith('route ')) continue;
+        const v = l.trim().split(/\s+/); const fb = v[v.length - 1] === 'fb'; const n = +v[7]; const pts = [];
+        for (let q = 0; q < n; q++) { const p = [+v[8 + q * 3], +v[9 + q * 3], +v[10 + q * 3]]; if (p.every(isFinite)) pts.push(p); }
+        if (pts.length >= 2) out.push({ fb, pts });
+    }
+    return out;
+}
+// ---- water (the tester 2026-11-15: "any way to paint water on maps?"). The scan already knows water: the bots' grid flags every
+// surface its rays hit as water (NAV_WATER). Sent as binary: Uint32 JSON length, JSON {x0 z0 cell w h count painted},
+// padding, Uint8 per cell (1 = the scan found open water there, 2 = water under a floor), Float32 the water height of each such cell (in cell order).
+function navHeader(file) {
+    const fd = fs.openSync(file, 'r'); const b = Buffer.alloc(60); fs.readSync(fd, b, 0, 60, 0); fs.closeSync(fd);
+    return { x0: b.readFloatLE(36), z0: b.readFloatLE(40), cell: b.readFloatLE(44), w: b.readInt32LE(48), h: b.readInt32LE(52) };
+}
+function waterData(map) {
+    const file = path.join(NAV, map + '.v8.nav'), st = fs.statSync(file), cacheFile = path.join(CACHE, map + '.water3');
+    let core = null;
+    try { const c = fs.statSync(cacheFile); if (c.mtimeMs > st.mtimeMs) core = fs.readFileSync(cacheFile); } catch (e) {}
+    const hd = navHeader(file);
+    if (!core) {
+        const buf = fs.readFileSync(file), n = hd.w * hd.h * L, HO = 60;
+        const height = new Float32Array(buf.buffer.slice(buf.byteOffset + HO, buf.byteOffset + HO + n * 4)), flags = buf.subarray(HO + n * 4, HO + n * 5);
+        const mask = new Uint8Array(hd.w * hd.h), hs = [];
+        for (let c = 0; c < hd.w * hd.h; c++) {
+            let top = null, dry = -Infinity;   // (the highest water surface in the cell - one in nearly every cell - and the highest dry floor)
+            for (let l = 0; l < L; l++) { const node = c * L + l; if (!(flags[node] & WALKABLE) || !isFinite(height[node])) continue; if (flags[node] & WATER) { if (top === null || height[node] > top) top = height[node]; } else if (height[node] > dry) dry = height[node]; }
+            // 2 = covered: a floor more than 2 m over the water; 3 = low ground just above it (a beach, a low island). The scan's rays go on through terrain, so the sea level under every
+            // hillside counts as water (Lancang Dam: 405 000 of 868 000 water cells) - and bridges and piers stand over real water
+            if (top !== null) { mask[c] = dry > top + 2 ? 2 : dry > top + 0.3 ? 3 : 1; hs.push(top); }
+        }
+        core = Buffer.concat([Buffer.from(new Uint32Array([hs.length]).buffer), Buffer.from(mask.buffer), Buffer.alloc((4 - mask.length % 4) % 4), Buffer.from(new Float32Array(hs).buffer)]);
+        try { fs.mkdirSync(CACHE, { recursive: true }); fs.writeFileSync(cacheFile, core); } catch (e) {}
+    }
+    const count = core.readUInt32LE(0), painted = readWater(map, hd);
+    const j = Buffer.from(JSON.stringify({ ...hd, count, painted })); const pad = (4 - ((4 + j.length) % 4)) % 4;
+    const head = Buffer.alloc(4); head.writeUInt32LE(j.length + pad);
+    return Buffer.concat([head, j, Buffer.alloc(pad, 32), core.subarray(4)]);
+}
+// the painted water file -> { add: [[y, cz, cx0, cx1]], erase: [[cz, cx0, cx1]] } (dropped when it was painted on another grid)
+function readWater(map, hd) {
+    const t = read(waterFile(map)), out = { add: [], erase: [] }; if (!t) return out;
+    for (const l of t.split(/\r?\n/)) {
+        const v = l.trim().split(/\s+/);
+        if (v[0] === 'grid') { const g = v.slice(1).map(Number); if (g[3] !== hd.w || g[4] !== hd.h || Math.abs(g[0] - hd.x0) > 0.01 || Math.abs(g[1] - hd.z0) > 0.01) return { add: [], erase: [], stale: true }; }
+        else if (v[0] === 'w' && v.length >= 5) { const r = v.slice(1, 5).map(Number); if (r.every(isFinite)) out.add.push(r); }
+        else if (v[0] === 'x' && v.length >= 4) { const r = v.slice(1, 4).map(Number); if (r.every(isFinite)) out.erase.push(r); }
+    }
+    return out;
+}
+function saveWater(map, w) {
+    const hd = navHeader(path.join(NAV, map + '.v8.nav')), file = waterFile(map);
+    const ok = (cz, a, b) => Number.isInteger(cz) && Number.isInteger(a) && Number.isInteger(b) && cz >= 0 && cz < hd.h && a >= 0 && b >= a && b < hd.w;
+    const add = (w.add || []).map(r => r.map(Number)).filter(r => isFinite(r[0]) && ok(r[1], r[2], r[3]));
+    const erase = (w.erase || []).map(r => r.map(Number)).filter(r => ok(r[0], r[1], r[2]));
+    const lines = [`# Thugbot water for ${map}, painted in the 3D map on top of the scan's own water: w <height> <row> <first col> <last col> = water, x <row> <first col> <last col> = not water`,
+        `grid ${hd.x0} ${hd.z0} ${hd.cell} ${hd.w} ${hd.h}`, ...add.map(r => `w ${f1(r[0])} ${r[1]} ${r[2]} ${r[3]}`), ...erase.map(r => `x ${r[0]} ${r[1]} ${r[2]}`)];
+    backup(file); fs.writeFileSync(file, lines.join('\n') + '\n');
+    return `water (${add.length} painted / ${erase.length} erased run(s))`;
+}
 function reportData(map) {
     let best = null;
     try { for (const f of fs.readdirSync(REPORT)) if (f.startsWith(map + '_') && f.endsWith('.html')) { const t = fs.statSync(path.join(REPORT, f)).mtimeMs; if (!best || t > best.t) best = { f, t }; } } catch (e) {}
@@ -171,7 +269,8 @@ function loadRoutes(map) {
     out.exits = et ? et.split(/\r?\n/).map(l => l.trim().split(/\s+/).map(Number)).filter(p => p.length === 3 && p.every(isFinite)) : [];
     const vs = read(vehiclesFile(map));
     out.vehicles = vs ? vs.split(/\r?\n/).map(l => l.trim().split(/\s+/)).filter(v => v[0] === 'veh' && v.length >= 7).map(v => ({ name: v[1], p: [+v[2], +v[3], +v[4]], yaw: +v[5], seen: +v[6] })).filter(v => v.p.every(isFinite)) : [];
-    out.files = { learn: !!lt, veh: !!vt, planned: !!pt, exits: !!et };
+    const bt = read(boatFile(map)); out.boat = readRouteLines(bt).map(({ pts }) => ({ pts }));
+    out.files = { learn: !!lt, veh: !!vt, planned: !!pt, exits: !!et, boat: !!bt };
     return out;
 }
 const f1 = v => (Math.round(v * 10) / 10).toFixed(1);
@@ -215,6 +314,16 @@ function saveRoutes(map, body) {
         }
         fs.mkdirSync(ROUTES, { recursive: true }); backup(file); fs.writeFileSync(file, head.join('\n') + '\n'); done.push(`${n} spawn/flag route(s)`);
     }
+    if (Array.isArray(body.boat)) {   // boat patrols: the .vroutes line format, in their own file (the bot code reads it for boats only)
+        const file = boatFile(map); const lines = [];
+        for (const r of body.boat) {
+            if (lines.length >= LIMITS.boatRoutes) break;
+            const c = clean(r).slice(0, LIMITS.boatPts); if (c.length < 2) continue; const a = c[0], b = c[c.length - 1];
+            lines.push(`route ${a.map(f1).join(' ')} ${b.map(f1).join(' ')} ${c.length} ` + c.map(p => p.map(f1).join(' ')).join(' '));
+        }
+        backup(file); fs.writeFileSync(file, lines.join('\n') + (lines.length ? '\n' : '')); done.push(`${lines.length} boat patrol route(s)`);
+    }
+    if (body.water && typeof body.water === 'object') done.push(saveWater(map, body.water));
     if (Array.isArray(body.exits)) {   // ways out of the water: "x y z" per line, 64 at most (pool.inc)
         const file = exitsFile(map); const ex = body.exits.map(p => (p || []).map(Number)).filter(p => p.length === 3 && p.every(isFinite)).slice(0, 64);
         backup(file); fs.writeFileSync(file, ex.map(p => p.map(f1).join(' ')).join('\n') + (ex.length ? '\n' : '')); done.push(`${ex.length} water exit(s)`);
@@ -239,15 +348,11 @@ function roadData(map) {
     const buf = fs.readFileSync(path.join(NAV, map + '.v8.nav'));
     const x0 = buf.readFloatLE(36), z0 = buf.readFloatLE(40), cell = buf.readFloatLE(44), w = buf.readInt32LE(48), h = buf.readInt32LE(52), n = w * h * L;
     const height = new Float32Array(buf.buffer.slice(buf.byteOffset + 60, buf.byteOffset + 60 + n * 4));
-    const rs = read(path.join(LEARN, map + '.roadscan'));
-    if (rs) {
-        const lines = rs.split(/\r?\n/), head = lines[0].trim().split(/\s+/).map(Number);
-        if (head[0] === w && head[1] === h && Math.abs(head[2] - x0) < 0.01 && Math.abs(head[3] - z0) < 0.01)
-            for (let k = 1; k < lines.length; k++) {
-                const node = +lines[k]; if (!lines[k] || !(node >= 0 && node < n)) continue;
-                const y = height[node]; if (!isFinite(y)) continue;
-                const c = Math.floor(node / L), cz = Math.floor(c / w), cx = c - cz * w; scan.push(x0 + cx * cell, y, z0 + cz * cell);
-            }
+    for (const node of roadScan(map, w, h, x0, z0, cell)) {
+        const y = height[node];
+        if (!Number.isFinite(y)) continue;
+        const c = Math.floor(node / L);
+        scan.push(x0 + (c % w) * cell, y, z0 + Math.floor(c / w) * cell);
     }
     const rd = read(path.join(LEARN, map + '.roads'));
     if (rd) for (const l of rd.split(/\r?\n/)) {
@@ -264,10 +369,39 @@ function roadData(map) {
 
 // ---- web server
 const send = (res, code, type, body) => { res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store' }); res.end(body); };
+let liveWatchAt = 0;
 const server = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://localhost'); const map = safeMap(u.searchParams.get('map'));
     try {
         if (u.pathname === '/' || u.pathname === '/index.html') return send(res, 200, 'text/html; charset=utf-8', fs.readFileSync(path.join(__dirname, 'index.html')));
+        if (u.pathname === '/favicon.ico') return send(res, 204, 'image/x-icon', '');
+        if (u.pathname === '/api/live' && req.method === 'GET') {
+            const now = Date.now();
+            if (now - liveWatchAt >= 3000) {
+                fs.writeFileSync(path.join(SERVER, 'Thugbot_live.watch'), '');
+                liveWatchAt = now;
+            }
+            const instances = [];
+            const snapshots = new Map();
+            for (const name of fs.readdirSync(SERVER)) {
+                const match = /^Thugbot_live\.(\d{1,5})\.json$/.exec(name);
+                if (!match) continue;
+                const file = path.join(SERVER, name);
+                const status = fs.statSync(file, { throwIfNoEntry: false });
+                if (!status || now - status.mtimeMs >= 5000) continue;
+                try {
+                    const snapshot = JSON.parse(read(file));
+                    if (!snapshot?.map) continue;
+                    instances.push({ port: +match[1], map: snapshot.map });
+                    snapshots.set(+match[1], snapshot);
+                } catch {}
+            }
+            instances.sort((a, b) => a.port - b.port);
+            const selected = snapshots.has(+u.searchParams.get('port')) ? +u.searchParams.get('port') : instances[0]?.port;
+            const snapshot = snapshots.get(selected);
+            return send(res, 200, 'application/json', JSON.stringify(snapshot ? { ...snapshot, port: selected, instances } : null));
+        }
+        if (u.pathname === '/patrolgen.js') return send(res, 200, 'text/javascript; charset=utf-8', fs.readFileSync(path.join(__dirname, 'patrolgen.js')));
         if (u.pathname === '/api/maps') {
             // Thugbot keeps one grid per level (mp_bank.v8.nav); a per-mode one (mp_bank_TurfWarLarge0.v8.nav) is an older
             // copy the bots no longer load, so it is listed only when the level has no grid of its own
@@ -276,7 +410,8 @@ const server = http.createServer((req, res) => {
             return send(res, 200, 'application/json', JSON.stringify({ server: SERVER, maps, live: liveMap(), limits: LIMITS, features: FEATURES }));
         }
         // the map's own top-down image, read from this PC's game files (textures\\<map>.jpg + .json: re\\scripts\\fb_minimap.py)
-        if (u.pathname === '/api/texinfo' && map) { const t = read(path.join(__dirname, 'textures', map + '.json')); return send(res, 200, 'application/json', t || 'null'); }
+        if (u.pathname === '/api/texinfo' && map) { const t = fs.existsSync(path.join(__dirname, 'textures', map + '.jpg')) && read(path.join(__dirname, 'textures', map + '.json')); return send(res, 200, 'application/json', t || 'null'); }
+        if (u.pathname === '/api/water' && map) return send(res, 200, 'application/octet-stream', waterData(map));
         if (u.pathname === '/api/teximg' && map) return send(res, 200, 'image/jpeg', fs.readFileSync(path.join(__dirname, 'textures', map + '.jpg')));
         if (u.pathname === '/api/roads' && map) return send(res, 200, 'application/octet-stream', roadData(map));
         if (u.pathname === '/api/playarea' && map) {   // the play area per mode: Thugbot_learned\\<map>.playarea (re\\scripts\\fb_playarea.py)
@@ -305,5 +440,5 @@ if (u.pathname === '/api/overhead' && map) return send(res, 200, 'application/js
         send(res, 404, 'text/plain', 'not found');
     } catch (e) { console.error(e); send(res, 500, 'text/plain', String(e.message || e)); }
 });
-module.exports = { roadData, buildCloud, loadRoutes, reportData, overheadData, liveMap, LIMITS };
+module.exports = { roadData, buildCloud, loadRoutes, reportData, overheadData, liveMap, waterData, saveRoutes, LIMITS, SERVER };
 if (require.main === module) server.listen(PORT, '127.0.0.1', () => console.log(`Thugbot 3D map: http://localhost:${PORT}/  (server folder ${SERVER})`));

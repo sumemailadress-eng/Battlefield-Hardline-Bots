@@ -38,7 +38,6 @@ typedef struct Bot {
     const char *why;                // what it is doing this frame ("bots" dump)
     int attackFlag;                 // flag index + 1 it last chose to attack (0 none) - kept across target resets
     ULONGLONG attackChooseAt;       // next time it may change the flag it attacks
-    ULONGLONG liftSince;            // waiting for / riding an elevator
     float steerPrev, flipYaw, flipWant, flipDist; unsigned flips;
     float stuckAt[3], escape[3]; int stuckRepeat; ULONGLONG stuckFirst, escapeUntil;   // repeated stuck -> escape point
     ULONGLONG takingAt;             // pressing E at a car it is taking
@@ -113,11 +112,16 @@ static int target_dead(const float *p);
 static volatile LONG g_unblockAll;   // "unblock": every temporary grid block back now
 static void target_mark_alive(const float *p);
 static void lifts_level_reset(void);   // lifts.inc
-static int lift_ride(Bot *b, const float *pos, ULONGLONG t);
+static int lift_ride(Bot *b, void *soldier, const float *pos, ULONGLONG t, int activeOnly);
 static int parachute_tick(int i, Bot *b, void *soldier, const float *pos, ULONGLONG t);   // parachute.inc
 static ULONGLONG g_airAt[MAX_BOTS];   // last time each bot was aboard an aircraft (heli.inc): leaving one opens the chute at once
 static void vehicles_level_reset(void);   // drive.inc
 static int vehicle_to_take(int i, const float *pos, const float *target, float *vpOut, const char **nameOut);
+static int getin_target(int i, float *vpOut, const char **nameOut); static void getin_stop(int i, const char *why);   // drive.inc: Get In!
+static int crew_follow_out_k(int i, int k, ULONGLONG t);   // drive.inc: the human this bot rode with got out
+static void help_reset(void);
+static void help_use_gear(int i, Bot *b, const float *pos, const float *to, ULONGLONG t);
+static int help_target(int i, const float *pos, float *out, int *nearOut);   // drive.inc: Follow me / Need backup
 static int name_is_air(const char *nm);   // drive.inc
 static int trunk_find(const float *pos, float *rear, void **car);   // drive.inc
 static int heli_ledge(int i, Bot *b, void *soldier, const float *pos, int team, ULONGLONG t);   // heli.inc
@@ -254,6 +258,7 @@ static void brain_level_reset(void)
     routes_level_reset();
     lifts_level_reset();
     vehicles_level_reset();
+    help_reset();
     nav_clear_links();   // (extra links point into the old grid)
     g_breachLoaded = 0; g_breachN = 0;
     survey_level_reset();
@@ -342,7 +347,7 @@ static void nav_tick(void)
     if (!g_nav) { nav_start(); return; }
     if (g_navBuilding) {
         int phase = g_nav->phase;
-        if (nav_build_step(g_nav, ray_cast, 4000, 4.0)) {   // (4000 rays / 4 ms a frame, was 12000 / 7: FloodBots measured 30 ms slices - hitches while a grid builds, the tester 2026-11-12)
+        if (nav_build_step(g_nav, ray_cast, 4000, 4.0)) {   // (4000 rays / 4 ms a frame, was 12000 / 7: earlier development code measured 30 ms slices - hitches while a grid builds, the tester 2026-11-12)
             g_navBuilding = 0;
             char path[160], learn[160];
             brain_paths(path, sizeof path, learn, sizeof learn);
@@ -365,7 +370,7 @@ static void nav_tick(void)
         }
         return;
     }
-    // Grow the grid only for a human on foot outside it, two looks running (FloodBots: a bot off at the map edge grew it and every
+    // Grow the grid only for a human on foot outside it, two looks running (earlier development code: a bot off at the map edge grew it and every
     // bot lost its route each time). Routes are world points: kept while the bigger grid is built.
     if (H->frame % 300 == 0) {
         float lo[2] = { 1e9f, 1e9f }, hi[2] = { -1e9f, -1e9f }; int out = 0;
@@ -811,6 +816,7 @@ static void breach_tick(Bot *b, void *soldier, ULONGLONG t)
 
 // [combat.inc hook]
 static int bot_block_towards(float x, float y, float z, float tx, float tz);   // (below: not when stuck in a crowd)
+#include "kits.inc"
 #include "combat.inc"
 #include "objectives.inc"
 #include "movement.inc"
@@ -949,13 +955,14 @@ static int plan_stopgap(int i, Bot *b, const float *pos, ULONGLONG t)
     g_lrSeed = b->seed; g_lrPick = -1;
     if (b->targetFlag >= 0 || b->objRoute) n = human_route_to_flag(pos, b->target, b->path, BRAIN_PATH_MAX);
     if (n) b->lroute = g_lrPick;
-    if (!n && (b->targetFlag >= 0 || b->objRoute)) { g_routePickSeed = b->seed; n = routes_pick(pos, b->target, b->path, BRAIN_PATH_MAX, &k); }
+    if (!n && (b->targetFlag >= 0 || b->objRoute)) { g_routePickSeed = route_seed(i, b); n = routes_pick(pos, b->target, b->path, BRAIN_PATH_MAX, &k); }
     if (!n) n = human_route_pick(pos, b->target, b->path, BRAIN_PATH_MAX);
     if (!n) {   // a teammate going to the same place with a route that passes within 25 m, reachable in a straight line
         int best = -1, bestK = 0; float bd = 25;
         for (int o = 0; o < H->botCount; o++) {
             Bot *ob = &g_bot[o];
             if (ob == b || !ob->alive || ob->npts < 2 || dist2d(ob->target, b->target) > 8) continue;
+            if (ob->route < 0 && ob->lroute < 0) continue;   // (only a teammate on a real route, 2026-11-15)
             for (int q = ob->wp > 0 ? ob->wp - 1 : 0; q < ob->npts; q++) {
                 float d = dist2d(pos, &ob->path[q * 3]);
                 if (d < bd && fabsf(ob->path[q * 3 + 1] - pos[1]) < 2.5f) { bd = d; best = o; bestK = q; }
@@ -964,10 +971,11 @@ static int plan_stopgap(int i, Bot *b, const float *pos, ULONGLONG t)
         if (best >= 0 && (bd < 2 || nav_direct_route(g_nav, ray_cast, pos, &g_bot[best].path[bestK * 3]))) {
             n = g_bot[best].npts - bestK;
             memcpy(b->path, &g_bot[best].path[bestK * 3], (size_t)n * 12);
+            k = g_bot[best].route; b->lroute = g_bot[best].lroute;
         }
     }
     if (!n && (b->targetFlag >= 0 || b->objRoute)) {
-        // (FloodBots) any learned route towards the target, however far off: joined in a straight line when that line is
+        // (earlier development code) any learned route towards the target, however far off: joined in a straight line when that line is
         // clear, else the grid's way to its nearest point (60 m at most, one such search a frame, capped)
         static float tail[BRAIN_PATH_MAX * 3]; float join[3];
         int nt = human_route_far(pos, b->target, join, tail, BRAIN_PATH_MAX - 1);
@@ -996,6 +1004,50 @@ static int plan_stopgap(int i, Bot *b, const float *pos, ULONGLONG t)
     return 1;
 }
 
+// (the tester 2026-11-15: "make sure bots will always stick to routes") the last known route (saved / learned, or a teammate's
+// one) each bot was on for its flag. After anything that took it off (cover, a chase, an unstick, a wall scrape, a car it
+// walked to, exploring, or the route's keep time running out) it goes back onto that same route at the nearest point
+// ahead of where it left it (in plain view, its floor, 35 m), instead of picking a route again from scratch.
+typedef struct Resume { float path[BRAIN_PATH_MAX * 3]; int npts, wp, route, lroute, flag; ULONGLONG planAt, at; } Resume;
+static Resume g_resume[MAX_BOTS];
+static unsigned g_resumed;
+static void resume_drop(int i) { if (i >= 0 && i < MAX_BOTS) g_resume[i].npts = 0; }
+static void resume_note(int i, Bot *b)   // after plan(), every frame: remember the known route it is on
+{
+    Resume *r = &g_resume[i];
+    if (b->npts && b->wp >= b->npts && r->planAt == b->planAt) { r->npts = 0; return; }   // walked to its end: nothing to go back to
+    if (!b->npts || b->wp >= b->npts || b->targetFlag < 0 || (b->route < 0 && b->lroute < 0)) return;
+    if (r->planAt != b->planAt || r->npts != b->npts || r->flag != b->targetFlag) {
+        memcpy(r->path, b->path, (size_t)b->npts * 12); r->npts = b->npts;
+        r->route = b->route; r->lroute = b->lroute; r->flag = b->targetFlag; r->planAt = b->planAt;
+    }
+    r->wp = b->wp; r->at = now_ms();
+}
+static int resume_route(int i, Bot *b, const float *pos, ULONGLONG t)
+{
+    Resume *r = &g_resume[i];
+    if (r->npts < 2 || b->targetFlag < 0 || r->flag != b->targetFlag || t - r->at > 180000 || b->stuckRepeat >= 2) return 0;
+    if (r->route >= 0 && (r->route >= g_routeN || g_routes[r->route].fails >= 3)) { r->npts = 0; return 0; }   // (cut / given up since)
+    if (r->lroute >= 0 && lr_blocked(r->lroute)) { r->npts = 0; return 0; }
+    if (dist2d(&r->path[(r->npts - 1) * 3], b->target) > 15) return 0;   // (not this target any more: a capture-area spot is within 12 m)
+    int best = -1; float bd = 35;
+    for (int k = r->wp > 0 ? r->wp - 1 : 0; k < r->npts - 1; k++) {
+        const float *q = &r->path[k * 3]; float d = dist2d(pos, q);
+        if (d < bd && fabsf(q[1] - pos[1]) < 2.5f) { bd = d; best = k; }
+    }
+    if (best < 0) return 0;
+    if (best + 1 < r->npts - 1 && fabsf(r->path[(best + 1) * 3 + 1] - pos[1]) < 2.5f && nav_segment_clear(ray_cast, pos, &r->path[(best + 1) * 3])) best++;   // (the next one in view: on, not back)
+    else if (bd > 2.5f && !nav_segment_clear(ray_cast, pos, &r->path[best * 3])) return 0;
+    int n = r->npts - best;
+    memcpy(b->path, &r->path[best * 3], (size_t)n * 12);
+    b->npts = n; b->wp = 0; b->route = r->route; b->lroute = r->lroute; b->planAt = t; b->noRouteSince = 0;
+    r->planAt = t; r->npts = n; memcpy(r->path, b->path, (size_t)n * 12); r->wp = 0; r->at = t;
+    nav_cancel_path(i);
+    g_resumed++;
+    { static unsigned rl; if (rl++ < 80) H->log("route: %s back on its route (%s %d) %.0f m away, %d points to go (%u so far)", (char *)b->player + OFF_PLAYER_NAME, b->route >= 0 ? "saved" : "learned", b->route >= 0 ? b->route : b->lroute, bd, n, g_resumed); }
+    return 1;
+}
+
 static void plan(int i, Bot *b, const float *pos)
 {
     ULONGLONG t = now_ms();
@@ -1015,9 +1067,10 @@ static void plan(int i, Bot *b, const float *pos)
     // frame there - about one plan a second per bot on Code Blue, each a fresh learned / saved route.
     if (b->npts && b->wp >= b->npts && dist2d(pos, b->target) < 3 && fabsf(pos[1] - b->target[1]) < 2.5f && dist2d(b->target, b->planTo) < 1) return;
     if (b->npts && b->wp >= b->npts && t < b->planAt + 1500 && dist2d(b->target, b->planTo) < 3) return;   // (ended short of it: not every frame either)
-    // (FloodBots) waiting on the planner queue: look again in 0.3 s, not every frame
+    // (earlier development code) waiting on the planner queue: look again in 0.3 s, not every frame
     if (g_planDeferAt[i] && t < g_planDeferAt[i] + 300 && dist2d(b->target, b->planTo) < 3) return;
     g_stopgapRoute[i] = 0;
+    if (resume_route(i, b, pos, t)) { memcpy(b->planTo, b->target, 12); return; }   // (2026-11-15: back onto the route it was on)
     g_planWhy[!b->npts ? 0 : b->wp >= b->npts ? 1 : 2]++;
     {   // (trace: "plantrace": the next 40 plans begun by bot 5 - what it was doing, where it was going)
         if (g_planTrace > 0 && i == 5) { g_planTrace--; H->log("plantrace: %s npts %d wp %d target %.1f %.1f %.1f planTo %.1f %.1f %.1f flag %d why %s fight %d", (char *)b->player + OFF_PLAYER_NAME,
@@ -1040,7 +1093,7 @@ static void plan(int i, Bot *b, const float *pos)
         if (n) { nav_cancel_path(i); b->planAt = t; b->npts = n; b->wp = n > 1 ? 1 : 0; b->route = -1; b->lroute = g_lrPick; g_learnedFirst++; return; }
         n = human_route_leg(pos, b->target, b->path, BRAIN_PATH_MAX);   // a learned route part of the way (plans on from its end)
         if (n) { nav_cancel_path(i); b->planAt = t; b->npts = n; b->wp = n > 1 ? 1 : 0; b->route = -1; b->lroute = g_lrPick; return; }
-        int k = -1; g_routePickSeed = b->seed; n = routes_pick(pos, b->target, b->path, BRAIN_PATH_MAX, &k);
+        int k = -1; g_routePickSeed = route_seed(i, b); n = routes_pick(pos, b->target, b->path, BRAIN_PATH_MAX, &k);
         if (n) { nav_cancel_path(i); b->planAt = t; b->npts = n; b->wp = n > 1 ? 1 : 0; b->route = k; return; }
     }
     b->route = -1;
@@ -1052,6 +1105,7 @@ static void plan(int i, Bot *b, const float *pos)
         for (int o = 0; o < H->botCount; o++) {
             Bot *ob = &g_bot[o];
             if (ob == b || ob->npts < 3 || ob->targetFlag != b->targetFlag || dist2d(ob->target, b->target) > 4) continue;
+            if (ob->route < 0 && ob->lroute < 0) continue;   // (the tester 2026-11-15: "always stick to routes") only a teammate on a real route - not its grid walk
             for (int k = ob->wp > 0 ? ob->wp - 1 : 0; k < ob->npts && k < ob->wp + 8; k++) {
                 float d = dist2d(pos, &ob->path[k * 3]);
                 if (d < bd && fabsf(ob->path[k * 3 + 1] - pos[1]) < 2) { bd = d; best = o; bestK = k; }
@@ -1061,7 +1115,7 @@ static void plan(int i, Bot *b, const float *pos)
             Bot *ob = &g_bot[best];
             int n = ob->npts - bestK;
             memcpy(b->path, &ob->path[bestK * 3], (size_t)n * 12);
-            b->npts = n; b->wp = 0; b->planAt = t; b->noRouteSince = 0;
+            b->npts = n; b->wp = 0; b->planAt = t; b->noRouteSince = 0; b->route = ob->route; b->lroute = ob->lroute;   // (its route ids too: kept like any route)
             g_routesShared++;
             return;
         }
@@ -1190,7 +1244,7 @@ static void bot_think(int i)
     ULONGLONG t = now_ms();
     if (!soldier) {
         if (b->alive && g_learn) bl_note_death(g_learn, b->lastPos);
-        b->alive = 0; b->npts = 0; b->fwd = b->strafe = b->turn = 0; b->buttons = 0; b->brStage = 0;
+        b->alive = 0; b->npts = 0; b->fwd = b->strafe = b->turn = 0; b->buttons = 0; b->brStage = 0; resume_drop(i);
         return;
     }
     const float *pos = soldier_pos(soldier);
@@ -1200,6 +1254,11 @@ static void bot_think(int i)
     if (heli_ledge(i, b, soldier, pos, team, t)) { b->alive = 1; return; }
     memcpy(b->lastPos, pos, 12);
 
+    if (lift_ride(b, soldier, pos, t, 1)) {
+        b->idleAt = b->progAt = b->progressAt = t;
+        memcpy(b->progressPos, pos, 12);
+        return;
+    }
     choose_target(i, b, team, pos);
     if (b->target[0] == 0 && b->target[2] == 0) { b->fwd = b->strafe = b->turn = 0; return; }
 
@@ -1214,7 +1273,7 @@ static void bot_think(int i)
         g_botTrail[i].bad = 1;
         b->avoidFlag = b->targetFlag >= 0 ? b->targetFlag : -1;
         b->avoidUntil = t + 30000;
-        b->npts = 0; b->planAt = 0; b->targetFlag = -1; b->route = -1;
+        b->npts = 0; b->planAt = 0; b->targetFlag = -1; b->route = -1; resume_drop(i);
         b->idleAt = t; memcpy(b->idlePos, pos, 12);
         nav_cancel_path(i);
     }
@@ -1246,7 +1305,7 @@ static void bot_think(int i)
                     int person = 0;
                     for (int j = 0; j < g_playerCount && !person; j++) { void *s2 = bot_soldier(g_players[j]); if (s2 && s2 != soldier && dist2d(soldier_pos(s2), h) < 1.0f) person = 1; }
                     if (vt != 0x2808310 && vt != 0x2819780 && !person && !low_wall_at(h) && !vehicle_near(h, 5.0f)) { fence_cut_at(h, "a bot stuck 12 s at it"); breach_learn(h, 'n');   // (0.4.3: not a parked car)
-                        // (0.4.9, from FloodBots) and the routes that led it here: saved ones through the spot cut, learned ones set aside 10 min, the grid link that way
+                        // (0.4.9, from earlier development code) and the routes that led it here: saved ones through the spot cut, learned ones set aside 10 min, the grid link that way
                         // closed, a new plan
                         float hf[3] = { h[0], pos[1], h[2] }; routes_cut_near(hf); int lrs = lr_block_near(hf);
                         if (g_nav && !g_navBuilding) nav_block_towards(g_nav, pos[0], pos[1], pos[2], w[0], w[2]);
@@ -1327,6 +1386,7 @@ static void bot_think(int i)
                 else b->seatedStillSince = 0;
                 if (b->seatedStillSince && t - b->seatedStillSince > 3000) told = 1;
             }
+            if (!told && crew_follow_out_k(i, k, t)) { told = 1; static unsigned cl; static ULONGLONG clAt[MAX_BOTS]; if (t - clAt[i] > 6000 && cl++ < 30) { clAt[i] = t; H->log("drive: %s gets out (out with the player, passenger seat)", (char *)player + OFF_PLAYER_NAME); } }
             if (told) { b->noVeh = kv; b->noVehUntil = t + 30000; }
             if (vehicle_has_driver(k) && !told) { b->why = "passenger"; b->buttons = 0; if (!pax_think(i, b, soldier, kv, team)) combat_tick(i, b, soldier, team); b->fwd = b->strafe = 0; b->buttons |= BTN_LEAN; return; }
             b->fwd = b->strafe = b->turn = 0;
@@ -1337,10 +1397,33 @@ static void bot_think(int i)
         }
     }
 
-    // A car to take (far flag, an empty known one close by): walk to it; at 3 m face it and press E.
-    if (b->targetFlag >= 0 && g_fight[i].state == CS_IDLE && !b->enemy) {
+    int assisting = 0;
+    {   // (2026-11-16) Follow me / Need backup (commo rose, drive.inc help_*): go to the player; there, stay round them and fight
+        float hp[3]; int nearP = 0;
+        if (help_target(i, pos, hp, &nearP)) {
+            assisting = 1;
+            if (nearP) {
+                b->fwd = b->strafe = 0; b->why = "with the player (commo rose)";
+                b->progressAt = t; b->progAt = t; memcpy(b->progressPos, pos, 12);
+                b->turn = turn_input(soldier_yaw(soldier), atan2f(hp[0] - pos[0], hp[2] - pos[2]), 3.0f);
+                help_use_gear(i, b, pos, hp, t);
+                combat_tick(i, b, soldier, team);
+                return;
+            }
+            b->why = "going to the player (commo rose)";
+            if (dist2d(b->planTo, hp) > 6) { b->npts = 0; b->planAt = 0; }
+            memcpy(b->target, hp, 12);
+            if (dist2d(pos, hp) > 30) b->buttons |= BTN_SPRINT;
+        }
+    }
+    // (2026-11-16) Get In!: a bot a human called to their vehicle goes there first, fighting or not, and boards it the same way.
+    float gvp[3]; const char *gname = "";
+    int calledK = getin_target(i, gvp, &gname);
+    if (calledK >= 0 || (!assisting && b->targetFlag >= 0 && g_fight[i].state == CS_IDLE && !b->enemy)) {
         float vp[3]; const char *vname = "";
-        int k = vehicle_to_take(i, pos, b->target, vp, &vname);
+        int k = calledK >= 0 ? calledK : vehicle_to_take(i, pos, b->target, vp, &vname);
+        if (calledK >= 0) { memcpy(vp, gvp, 12); vname = gname; }
+        if (calledK >= 0 && b->takingAt && t - b->takingAt > 12000) getin_stop(i, "E did nothing at its doors for 12 s");
         // (the tester 2026-11-07: "when I'm sitting still in a vehicle, they walk slowly towards the car and never enter"; no helicopter was boarded on foot all day) Within 3.5 m of the
         // centre a bot crept at a fifth of walking speed pressing E, and gave up after 4 s. Now: from 6 m it goes to a door - one of four points beside the vehicle (1.5 m out,
         // 2.4 for a helicopter, front and back of the middle), the nearest first, the next every 3 s - presses E from 2.5 m of it, and gives up after 12 s. It runs there.
@@ -1377,7 +1460,7 @@ static void bot_think(int i)
                 if (de > 0.9f) { b->turn = turn_input(soldier_yaw(soldier), atan2f(ep[0] - pos[0], ep[2] - pos[2]), 3.0f); b->fwd = de > 2.0f ? 1.0f : 0.6f; }
                 else { b->turn = turn_input(soldier_yaw(soldier), atan2f(vp[0] - pos[0], vp[2] - pos[2]), 3.0f); b->fwd = 0; }
                 b->strafe = 0;
-                if (de < 2.5f && (t / 200) % 2 == 0) b->buttons |= vair ? BTN_INTERACT | BTN_EXIT : BTN_INTERACT;   // (the second hash a human's E sends: FloodBots)
+                if (de < 2.5f && (t / 200) % 2 == 0) b->buttons |= vair ? BTN_INTERACT | BTN_EXIT : BTN_INTERACT;   // (the second hash a human's E sends: earlier development code)
                 b->why = "getting in a car";
                 return;
             }
@@ -1405,7 +1488,7 @@ static void bot_think(int i)
     if (b->escapeUntil && t < b->escapeUntil && dist2d(pos, b->escape) > 2) memcpy(b->target, b->escape, 12);   // (targetFlag kept: changing it re-plans every frame)
     else if (b->escapeUntil) { b->escapeUntil = 0; b->npts = 0; b->planAt = 0; }
 
-    plan(i, b, pos);
+    plan(i, b, pos); resume_note(i, b);
     if (b->roofVeh && t >= b->roofAt) {   // roof helicopter: does the plan reach its roof? Logged now and then; no way up after 25 s - left alone for 3 min, and the map noted for a drawn route
         b->roofAt = t + 8000;
         const float *end = b->npts ? &b->path[(b->npts - 1) * 3] : NULL;
@@ -1430,16 +1513,38 @@ static void bot_think(int i)
         const float *nx = &b->path[(b->wp + 1) * 3];
         if (fabsf(nx[1] - pos[1]) < 1.5f && dist2d(pos, nx) < 14 && nav_segment_clear(ray_cast, pos, nx) && floor_continuous(pos, nx)) b->wp++;
     }
+    {   // (the tester 2026-11-12, earlier development code, ported 2026-11-15: "make sure bots stick to routes") pushed off it (a fight, a crowd, a wall): back onto the
+        // route at the point it is nearest to among the next ones (40 m along at most) when that point is in plain view - not back to a point it
+        // already passed. Far off it (15 m+) with no clear line back for 3 s: planned again, which goes back onto the route it was on (resume_route).
+        static ULONGLONG rejoinAt[MAX_BOTS], offSince[MAX_BOTS]; static unsigned rejoins, offReplans;
+        if (b->npts && b->wp < b->npts && t >= rejoinAt[i] && ((H->frame + (unsigned)i) & 15) == 0) {
+            rejoinAt[i] = t + 400;
+            int nk = b->wp; float nd = dist2d(pos, &b->path[b->wp * 3]), along = 0;
+            for (int k = b->wp + 1; k < b->npts && k < b->wp + 16; k++) {
+                along += dist2d(&b->path[(k - 1) * 3], &b->path[k * 3]); if (along > 40) break;
+                const float *q = &b->path[k * 3]; float d = dist2d(pos, q);
+                if (d < nd - 1.0f && fabsf(q[1] - pos[1]) < 2.2f) { nd = d; nk = k; }
+            }
+            if (nk > b->wp && nav_segment_clear(ray_cast, pos, &b->path[nk * 3]) && floor_continuous(pos, &b->path[nk * 3])) { b->wp = nk; rejoins++; }
+            const float *w = &b->path[b->wp * 3];
+            if (dist2d(pos, w) > 15 && g_fight[i].state == CS_IDLE && !nav_segment_clear(ray_cast, pos, w)) {
+                if (!offSince[i]) offSince[i] = t;
+                else if (t - offSince[i] > 3000) {
+                    offSince[i] = 0; offReplans++; b->npts = 0; b->planAt = 0;
+                    static unsigned ol; if (ol++ < 60) H->log("route: %s is %.0f m off its route with no way straight back - joins one again (%u rejoins, %u re-plans so far)", (char *)player + OFF_PLAYER_NAME, dist2d(pos, w), rejoins, offReplans);
+                }
+            } else offSince[i] = 0;
+        }
+    }
     if (b->npts && b->wp < b->npts) aim = &b->path[b->wp * 3];
     // No route (still being planned, or none found): walking straight at the target is what ran bots into walls after
-    // a retarget. Only do it when the straight line is walkable; otherwise turn towards it and wait for the planner,
-    // and after 5 s without any route fall back to the straight line (the stuck handling takes over from there).
+    // a retarget. Use the direct line only if it stays walkable. While planning, try a nearby open passage.
     int hold = 0;
     if (b->npts && b->wp < b->npts) b->noRouteSince = 0;
-    else if (g_nav && !g_navBuilding && dist2d(pos, b->target) > 2.5f) {
+    else if (g_nav && !g_navBuilding && (dist2d(pos, b->target) > 2.5f || fabsf(pos[1] - b->target[1]) > 1.8f)) {
         if (!b->noRouteSince) b->noRouteSince = t;
         if (t >= b->directAt) { b->directAt = t + 400; b->directOk = nav_direct_route(g_nav, ray_cast, pos, b->target); }
-        hold = !b->directOk && t - b->noRouteSince < 5000;
+        hold = !b->directOk;
     }
     // Waiting for its route (63 bots share one planner: after a flag changes hands 30 requests queue up and bots stood
     // "waiting for a route" for seconds - the tester 2026-10-26: "they just stay still and do nothing"): walk meanwhile the open
@@ -1461,6 +1566,8 @@ static void bot_think(int i)
                 if (clear < 2.5f) continue;
                 float f0[3] = { pos[0] + dx * 3, pos[1] + 1.0f, pos[2] + dz * 3 }, f1[3] = { f0[0], pos[1] - 1.5f, f0[2] };
                 if (!ray_cast(f0, f1, h, NULL) || h[1] > pos[1] + 0.6f) continue;
+                float step[3] = {pos[0] + dx * 4, pos[1], pos[2] + dz * 4};
+                if (!nav_segment_clear(ray_cast, pos, step) || !floor_continuous(pos, step)) continue;
                 float score = clear + 5.0f * cosf(wrap_pi(a - want));
                 if (score > best) { best = score; b->waitDir = a; b->waitDirOk = 1; }
             }
@@ -1470,13 +1577,18 @@ static void bot_think(int i)
             aim = waitAim; hold = 0; b->why = "heading out while its route is planned";
         }
     }
+    if (lift_ride(b, soldier, pos, t, 0)) {
+        b->brStage = 0;
+        b->idleAt = b->progAt = b->progressAt = t;
+        memcpy(b->progressPos, pos, 12);
+        return;
+    }
     // A door or pane in the way: open / break it before walking on (unless an enemy needs shooting first).
     if (b->brStage || breach_start(b, pos, aim, t)) {
         combat_tick(i, b, soldier, team);   // [combat.inc hook]
         if (!b->enemy) { b->why = "door / pane"; breach_tick(b, soldier, t); b->progressAt = t; memcpy(b->progressPos, pos, 12); return; }
         b->brStage = 0;
     }
-    if (lift_ride(b, pos, t)) { b->why = "elevator"; b->progressAt = t; memcpy(b->progressPos, pos, 12); combat_tick(i, b, soldier, team); b->fwd = b->strafe = 0; return; }
     steer_towards(b, soldier, aim);
     if (pool_exit(b, soldier, pos, t)) { b->why = "climbing out of water"; b->progressAt = t; memcpy(b->progressPos, pos, 12); return; }
     if (parachute_tick(i, b, soldier, pos, t)) { b->why = "parachute"; b->progressAt = t; memcpy(b->progressPos, pos, 12); return; }   // off a roof / falling
@@ -1762,6 +1874,8 @@ static void route_test_tick(void)
 }
 static void perf_part(int k, LARGE_INTEGER *since);   // core.c
 static int g_shed, g_shedOn = 1;   // overloaded (core.c): each bot thinks every other frame ("shed 0": never)
+#include "live_view.inc"
+
 static void brain_tick(void)
 {
     LARGE_INTEGER pt; QueryPerformanceCounter(&pt);
@@ -1788,6 +1902,7 @@ static void brain_tick(void)
     combat_frame();   // [combat.inc hook]
     vehicles_learn_soldier_vt();
     vehicles_track();
+    { ULONGLONG tt = now_ms(); crew_follow_tick(tt); getin_tick(tt); }   // team play (drive.inc)
     heli_watch_humans();
     chute_watch_humans();
     perf_part(2, &pt);
@@ -1812,6 +1927,7 @@ static void brain_tick(void)
         }
     }
     perf_part(3, &pt);
+    live_snapshot();
     routes_tick();
     perf_part(4, &pt);
     water_learn();
@@ -1827,7 +1943,7 @@ static void brain_tick(void)
     lifts_load(); lifts_link(); oneway_fix(); lifts_watch_humans();
     jumptest_frame();
     drivetest_frame();
-    // Saves every minute; the map page only every 10 minutes or on "report": together they stall a frame each minute (FloodBots: players rubber-banded)
+    // Saves every minute; the map page only every 10 minutes or on "report": together they stall a frame each minute (earlier development code: players rubber-banded)
     {
         int rep = InterlockedExchange(&g_reportNow, 0);
         static ULONGLONG reportAt;

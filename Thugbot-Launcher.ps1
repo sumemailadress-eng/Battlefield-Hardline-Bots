@@ -1,5 +1,4 @@
-# Thugbot Launcher: one window for the whole Hardline bot setup - orange and white, with police lights (the FloodBots
-# Launcher made for Battlefield Hardline).
+# Thugbot Launcher: one window for the Hardline backend, servers, bots and map tools.
 #   - starts the backend: MySQL, the web server (Apache), the redirector and the Hardline emulator (BlazeServerH)
 #   - Servers 1 - 4 (BF-Portable's !StartServer.bat ... !StartServer4.bat): start / stop each, bots per server,
 #     and each server's own map list (Instance*\Admin\MapList.txt) with the mode per map
@@ -88,7 +87,7 @@ foreach ($n in 1..4) {
     }
 }
 
-# ---------------------------------------------------------------- RCON (same protocol code as FloodBots-Control.ps1)
+# ---------------------------------------------------------------- RCON
 function Send-Packet($stream, [int]$seq, [string[]]$words) {
     $body = New-Object IO.MemoryStream
     foreach ($w in $words) {
@@ -847,7 +846,7 @@ function Select-Server([int]$n) {
 }
 
 # the bot start file for server n: made once from BF-Portable's own !StartServerN.bat (its name, ports, password), with the
-# engine's pseudo-players added - the same way Start-FloodBots.ps1 makes !StartServer-FloodBots.bat for server 1
+# engine's pseudo-player options added.
 function Get-BotBat($s, [int]$bots) {
     $bat = $s.BotBat
     if (-not (Test-Path $bat)) {
@@ -1192,7 +1191,11 @@ function Apply-Update([string]$from, [string]$to, [string]$backup, [switch]$DryR
         $rel = $f.FullName.Substring($from.Length).TrimStart('\')
         $dst = Join-Path $to $rel; $mode = Update-Keep $rel
         if ($mode -eq 'keep' -and (Test-Path $dst)) { $kept++; continue }
-        if ($mode -eq 'missing' -and (Test-Path $dst)) { $kept++; continue }
+        if ($mode -eq 'missing' -and (Test-Path $dst)) {
+            $emptyDowntownSeed = $rel -match '^Data\\Thugbot_learned\\mp_downtown\.(lifts|vroutes)$' -and
+                (Get-Item -LiteralPath $dst).Length -eq 0 -and $f.Length -gt 0
+            if (-not $emptyDowntownSeed) { $kept++; continue }
+        }
         $existed = Test-Path $dst
         if (-not $DryRun) {
             if ($existed) { $b = Join-Path $backup $rel; New-Item -ItemType Directory -Force (Split-Path $b) | Out-Null; Copy-Item $dst $b -Force }

@@ -1,3 +1,10 @@
 Thugbot-Paths.ini
 *.log
 Thugbot_cmd.txt
+
+/tools/Map3D/cache/
+/tools/Map3D/textures/
+/Source/tools/Map3D/cache/
+/Source/tools/Map3D/textures/
+__pycache__/
+/Source/out/

@@ -1,4 +1,4 @@
-// (rubber-banding check 2026-11-12, as in FloodBots: IsBadReadPtr is a kernel query - per frame per gun candidate it cost 12 - 30 ms a frame there)
+// (rubber-banding check 2026-11-12, as in earlier development code: IsBadReadPtr is a kernel query - per frame per gun candidate it cost 12 - 30 ms a frame there)
 static int gh_rd_ok(const void *p, size_t n) { int ok = 1; __try { volatile char a = *(const volatile char *)p, z = ((const volatile char *)p)[n - 1]; (void)a; (void)z; } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; } return ok; }
 // (the tester 2026-10-30: "chopper mounted guns aren't shooting") the line from the gun stopped on the helicopter's own body
 // (2.5 m out is still inside a transport's cabin / under its rotor) or on the target vehicle's hull: a hit within 4 m of
@@ -18,7 +18,7 @@ static int air_line_ok(const float *a, const float *q)
     float dx = h[0] - q[0], dy = h[1] - q[1], dz = h[2] - q[2];
     return dx * dx + dy * dy + dz * dz < 100.0f;
 }
-// Thugbot vehicle gunners (FloodBots drive_test version, THUGBOT_HELI_PORT) (included by brain.inc after heli.inc): bots in a seat whose controllable is the vehicle
+// Thugbot vehicle gunners (earlier development code drive_test version, THUGBOT_HELI_PORT) (included by brain.inc after heli.inc): bots in a seat whose controllable is the vehicle
 // (helicopter door guns, boat turrets ...), and attack-helicopter pilots' nose guns (heli.inc).
 //
 //   The gun's direction isn't mapped, so it is found per seat: on getting in, every plausible matrix of the vehicle

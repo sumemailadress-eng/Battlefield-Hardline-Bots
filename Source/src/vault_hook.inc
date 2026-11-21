@@ -1,15 +1,15 @@
 // ThugBot: the vault carry for pseudo-player bots (included by core.c after brain.inc; vault_tick runs every server frame).
-// Ported from FloodBots 2026-11-05, which took the idea from the Chinese bot mod.
+// Ported from earlier development code 2026-11-05, which took the idea from the Chinese bot mod.
 //
 // A jump at an obstacle starts the game's vault, but the server never animates pseudo-players, so it hangs and the bot is put
 // back. So a bot in a vault jump is carried from where it jumped to the landing spot the movement code found, through the
 // character's own velocity setter (positions written from outside are undone by the game).
 //
-// Hardline differs from BF4 here: the vault part is a heap object with no reliable way back to its soldier (FloodBots' hook
+// Hardline differs from BF4 here: the vault part is a heap object with no reliable way back to its soldier (earlier development code' hook
 // on the part's tick faulted at level changes and left the carry dead on a whole map, 2026-11-05: 39 carries, 0 landed). But
 // soldier+0x70 IS the character entity, seen on every bot, so no hook on the vault part is needed at all.
 //
-// the tester 2026-11-05: "make sure the vaulting never fails and they dont get placed back". Beyond the FloodBots version:
+// the tester 2026-11-05: "make sure the vaulting never fails and they dont get placed back". Beyond the earlier development code version:
 //  - the arc climbs above the obstacle's top first, then crosses, then comes down (it used to rise only 0.4 m above the
 //    higher end, straight at the wall: a 1.3 m wall stopped it);
 //  - a bot found short of the landing after the carry (put back, or stopped) is carried again, higher, VAULT_RETRIES times.

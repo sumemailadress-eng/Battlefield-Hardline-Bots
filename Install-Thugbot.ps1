@@ -31,7 +31,14 @@ $data = Join-Path $PSScriptRoot 'Data'
 if (Test-Path $data) {
     foreach ($d in Get-ChildItem $data -Directory) {
         $to = Join-Path $Server $d.Name; New-Item -ItemType Directory -Force $to | Out-Null
-        foreach ($fi in Get-ChildItem $d.FullName -File) { $t = Join-Path $to $fi.Name; if (-not (Test-Path $t)) { Copy-Item $fi.FullName $t } }
+        foreach ($fi in Get-ChildItem $d.FullName -File) {
+            $t = Join-Path $to $fi.Name
+            $old = Get-Item -LiteralPath $t -ErrorAction SilentlyContinue
+            # Older builds could save an empty Downtown lift file when the cab was away.
+            $emptyDowntownSeed = $old -and $old.Length -eq 0 -and $d.Name -eq 'Thugbot_learned' -and
+                $fi.Name -in 'mp_downtown.lifts', 'mp_downtown.vroutes'
+            if (-not $old -or $emptyDowntownSeed) { Copy-Item -LiteralPath $fi.FullName -Destination $t -Force }
+        }
     }
 }
 Write-Host "Thugbot installed in $Server (stock DLL backed up in $backup)."

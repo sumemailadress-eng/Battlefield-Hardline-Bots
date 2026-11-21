@@ -23,10 +23,26 @@ static unsigned g_farLegs;   // grid-then-route joins onto a leg (not reaching t
 static int lr_users(int r);   // (brain.inc: bots walking learned route r)
 static float lr_spread(int r) { return 1.0f + 0.6f * (float)(((g_lrSeed * 2654435761u) ^ ((unsigned)r * 2246822519u)) % 1000) / 1000.0f; }
 
-// (FloodBots port 2026-11-12) Learned routes through a spot bots keep getting stuck at are left alone for 10 minutes (FloodBots, the tester 2026-10-27,
+// (earlier development code port 2026-11-12) Learned routes through a spot bots keep getting stuck at are left alone for 10 minutes (earlier development code, the tester 2026-10-27,
 // Siege: "the routes led team 2 into a barrier again and again").
 static ULONGLONG g_lrBlockUntil[BL_MAX_ROUTES];
 static int lr_blocked(int r) { return r >= 0 && r < BL_MAX_ROUTES && g_lrBlockUntil[r] && now_ms() < g_lrBlockUntil[r]; }
+
+// (the tester 2026-11-15: "make sure bots always stick to routes") a saved route ends at the flag, or a learned foot route
+// (one the tester walked / drew, or a clean bot trip) reaches within 15 m of it on its floor: bots go there by those routes.
+static int flag_has_routes(const float *fp)
+{
+    for (int i = 0; i < g_routeN; i++) {
+        const SRoute *r = &g_routes[i];
+        if (r->n >= 2 && r->fails < 3 && (dist2d(r->pts[0], fp) <= 10 || dist2d(r->pts[r->n - 1], fp) <= 10)) return 1;
+    }
+    if (g_learn) for (int r = 0; r < g_learn->nRoutes && r < BL_MAX_ROUTES; r++) {
+        BLRoute *rt = &g_learn->routes[r];
+        if (rt->kind != BL_FOOT || rt->n < 2 || lr_blocked(r)) continue;
+        for (int m = 0; m < rt->n; m++) if (dist2d(rt->pts[m], fp) < 15 && fabsf(rt->pts[m][1] - fp[1]) < 4) return 1;
+    }
+    return 0;
+}
 static int lr_block_near(const float *p)
 {
     int n = 0;
@@ -34,7 +50,7 @@ static int lr_block_near(const float *p)
     for (int r = 0; r < g_learn->nRoutes && r < BL_MAX_ROUTES; r++) {
         BLRoute *rt = &g_learn->routes[r];
         for (int k = 0; k < rt->n; k++)
-            if (dist2d(rt->pts[k], p) < 4 && fabsf(rt->pts[k][1] - p[1]) < 3) { g_lrBlockUntil[r] = now_ms() + 600000; n++; break; }
+            if (dist2d(rt->pts[k], p) < 4 && fabsf(rt->pts[k][1] - p[1]) < 3) { g_lrBlockUntil[r] = now_ms() + 120000; /* (2 min, was 10, as earlier development code: the tester 2026-11-12 "We have ROUTES!") */ n++; break; }
     }
     return n;
 }

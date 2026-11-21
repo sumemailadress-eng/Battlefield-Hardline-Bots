@@ -2,7 +2,7 @@
 // (0x140000000 when not relocated); found with Ghidra (re\dump). The counterpart of AltBotMod's ADDR_/OFF_ table.
 #pragma once
 
-// Helicopter port from FloodBots: 1 = pilots fly and fight by default (heli_test build.bat passes it), 0 = pilots get out as before. Ini HeliFly overrides.
+// Helicopter port from earlier development code: 1 = pilots fly and fight by default (heli_test build.bat passes it), 0 = pilots get out as before. Ini HeliFly overrides.
 #ifndef THUGBOT_HELI_PORT
 #define THUGBOT_HELI_PORT 0
 #endif

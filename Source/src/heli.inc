@@ -1,5 +1,5 @@
 // Thugbot helicopters (included by brain.inc after drive.inc): bots that sit in a helicopter's pilot seat.
-// Ported from FloodBots drive_test\src\heli.inc 2026-11-06 (THUGBOT_HELI_PORT, ini HeliFly). Left out on purpose: remote seat
+// Ported from earlier development code drive_test\src\heli.inc 2026-11-06 (THUGBOT_HELI_PORT, ini HeliFly). Left out on purpose: remote seat
 // switching / enterEntry (BF4 crashes, no control) - pilots only come from the game's spawn into a vehicle or walking up + E;
 // transport drops (they need Hardline's exit call and entry list); the dead rocket picker; BF4's spawner hook.
 //

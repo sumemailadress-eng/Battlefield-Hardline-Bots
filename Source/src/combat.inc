@@ -106,7 +106,7 @@ static void settings_load(void)
     g_spawnSeatPctIni = GetPrivateProfileIntA("Thugbot", "SpawnInVehiclePercent", 0, path);
     GetPrivateProfileStringA("Thugbot", "MgDamageScale", "2", v, sizeof v, path); g_mgScale = fmaxf(0, fminf(10, (float)atof(v)));
     g_vehDmgHumansPct = GetPrivateProfileIntA("Thugbot", "VehicleDamageToHumans", 100, path); if (g_vehDmgHumansPct < 0) g_vehDmgHumansPct = 0; if (g_vehDmgHumansPct > 400) g_vehDmgHumansPct = 400;
-    H->log("settings: ThugBot 0.4.10, bot vehicle guns x%.2f, damage from bots' vehicles to people %d%%, aim learning %s (max skill %.2f), heli port %s, heli mode %d", g_mgScale, g_vehDmgHumansPct, g_aimLearn ? "on" : "off", g_aimLearnMax, THUGBOT_HELI_PORT ? "built in" : "off by default", g_heliMode);
+    H->log("settings: ThugBot 0.4.3, bot vehicle guns x%.2f, damage from bots' vehicles to people %d%%, aim learning %s (max skill %.2f), heli port %s, heli mode %d", g_mgScale, g_vehDmgHumansPct, g_aimLearn ? "on" : "off", g_aimLearnMax, THUGBOT_HELI_PORT ? "built in" : "off by default", g_heliMode);
     P = &kProfiles[g_set.difficulty];
     H->log("settings: %s - difficulty %s, aggression %d, defend share %.2f, combat %s, peek %s, vehicles %s, supplies %s", path, kProfileNames[g_set.difficulty],
            g_set.aggression, g_set.defendShare, g_set.combat ? "on" : "off (simple)", g_set.peek ? "on" : "off", g_set.vehicles ? "on" : "off", g_set.supplies ? "on" : "off");
@@ -789,34 +789,101 @@ static void grenade_consider(int i, Bot *b, Fight *f, void *soldier, int team, i
 //   Launcher: the enemy it was fighting went out of sight in the last 5 s, 10 - 70 m away, and the line to him stops
 //             within 4 m of him (he is just behind a wall / car / crate), or 2+ enemies bunched within 6 m at 20 - 70 m.
 //             Every 20 s per bot. Aimed high for the drop (about d^2 / 1150 m).
-//   Gadgets:  hurt and in cover, every 30 s: gadget 1 then gadget 2 next time, aimed at the feet (med / ammo kits).
-//   Supplies: (the tester 2026-10-26: "make sure bots drop ammo and healthpacks") out of a fight with teammates close by - one
-//             hurt within 12 m, or two or more within 10 m - every 35 - 50 s: the class item (static gadget), gadget 1,
-//             gadget 2 in turn, dropped between it and them. Which slot holds the kit depends on the loadout, so all
-//             three are tried in turn; a slot with something else in it just fires once at the floor.
+// Support gadgets are selected from the Hardline customization slots.
 enum { GS_NONE, GS_LAUNCHER, GS_GADGET };
-typedef struct GearUse { int kind, slot; ULONGLONG at, next, gadgetNext, supplyNext; float to[3]; int supplySlot, onTheMove; } GearUse;
+typedef struct GearUse {
+    int kind, slot, support, fired, cancelled;
+    ULONGLONG at, next, supplyNext, supplyCheckAt, firedAt;
+    float to[3];
+    void *asset;
+} GearUse;
 static GearUse g_gear[MAX_BOTS];
-static unsigned g_launches, g_gadgetUses, g_supplyDrops, g_farIgnored;
+static unsigned g_launches, g_supplyDrops, g_farIgnored;
+static struct { float p[3]; int team, kind; ULONGLONG at; } g_supplyDropsNear[32];
+static unsigned g_supplyDropNext;
+
+static int gear_support(int i, Bot *b, const float *pos, const float *target, int support, ULONGLONG t)
+{
+    GearUse *g = &g_gear[i];
+    if (g->kind != GS_NONE || t < g->supplyNext) return 0;
+    int slot;
+    void *asset = kit_find_gadget(b->player, support, &slot);
+    if (!asset) return 0;
+    g->kind = GS_GADGET;
+    g->slot = slot;
+    g->support = support;
+    g->asset = asset;
+    g->at = t;
+    g->fired = g->cancelled = 0;
+    g->firedAt = 0;
+    memcpy(g->to, target ? target : pos, 12);
+    return 1;
+}
 static int gear_tick(int i, Bot *b, void *soldier)
 {
     GearUse *g = &g_gear[i];
     if (g->kind == GS_NONE) return 0;
     ULONGLONG t = now_ms(), e = t - g->at;
     const float *p = soldier_pos(soldier);
-    // (a supply drop is done on the move: it keeps walking its route, only the view dips to drop the kit at its feet)
-    if (!g->onTheMove) b->fwd = b->strafe = 0;
+    b->fwd = b->strafe = 0;
     b->buttons &= ~(BTN_SPRINT | BTN_FIRE | BTN_ZOOM);
-    if (e < 200) b->buttons |= g->kind == GS_LAUNCHER ? BTN_GL : g->slot == 1 ? BTN_GADGET1 : g->slot == 2 ? BTN_GADGET2 : BTN_STATIC;
-    float eye[3] = { p[0], p[1] + 1.6f, p[2] }, d = dist2d(eye, g->to);
-    float wantEl = g->kind == GS_GADGET ? -1.1f : atan2f(g->to[1] + 1.0f + d * d / 1150.0f - eye[1], fmaxf(0.5f, d));
-    if (!g->onTheMove) b->turn = turn_input(soldier_yaw(soldier), atan2f(g->to[0] - p[0], g->to[2] - p[2]), 3.0f);
+    if (g->kind == GS_GADGET && !g->fired) {
+        int slot;
+        if (kit_find_gadget(b->player, g->support, &slot) != g->asset || slot != g->slot) {
+            b->buttons |= BTN_PRIMARY;
+            g->kind = GS_NONE;
+            return 1;
+        }
+    }
+
+    if (e < 240) b->buttons |= g->kind == GS_LAUNCHER ? BTN_GL : g->slot == 1 ? BTN_GADGET1 : BTN_GADGET2;
+    float eye[3] = {p[0], p[1] + 1.6f, p[2]}, d = dist2d(eye, g->to);
+    float yaw = soldier_yaw(soldier);
+    float want = d > 0.25f ? atan2f(g->to[0] - p[0], g->to[2] - p[2]) : yaw;
+    float wantEl = atan2f(g->to[1] + 1.0f + d * d / 1150.0f - eye[1], fmaxf(0.5f, d));
+    if (g->kind == GS_GADGET) wantEl = atan2f(g->to[1] - eye[1], fmaxf(0.55f, d));
+    b->turn = turn_input(yaw, want, 3.0f);
     float el = view_elevation(soldier);
-    if (el == el) b->pitch = fmaxf(-1, fminf(1, g_pvUp * (wantEl - el) * 3.0f));
-    if (e >= 1300 && e < 1600) b->buttons |= BTN_FIRE;            // the switch takes about a second
-    if (e >= 2600 && e < 2800) b->buttons |= BTN_PRIMARY;         // and back to the gun
-    if (e >= 3200) { g->kind = GS_NONE; g->onTheMove = 0; }
-    b->why = g->kind == GS_LAUNCHER ? "grenade launcher" : "using a gadget";
+    if (isfinite(el)) b->pitch = fmaxf(-1, fminf(1, g_pvUp * (wantEl - el) * 3.0f));
+    ULONGLONG primaryAt = g->at + 2600;
+    if (g->kind == GS_LAUNCHER && e >= 1300 && e < 1600) b->buttons |= BTN_FIRE;
+    if (g->kind == GS_GADGET) {
+        int tool = g->support == KIT_REPAIR;
+        int aligned = fabsf(wrap_pi(want - yaw)) < 0.50f && (!isfinite(el) || fabsf(wantEl - el) < 0.35f);
+        if (!g->cancelled && e >= 1150 && aligned &&
+            (!g->firedAt ? e < 4500 : t - g->firedAt < (tool ? 3000 : 200))) {
+            b->buttons |= BTN_FIRE;
+            if (!g->fired) {
+                g->fired = 1;
+                g->firedAt = t;
+                g->supplyNext = t + (tool ? 6500 : 18000);
+                char name[128];
+                if (g_supplyDrops++ < 80) H->log("supply: %s uses %s in gadget %d", (char *)b->player + OFF_PLAYER_NAME,
+                                               kit_asset_name(g->asset, name, sizeof name), g->slot);
+                if (!tool) {
+                    unsigned k = g_supplyDropNext++ % 32;
+                    g_supplyDropsNear[k].kind = g->support;
+                    g_supplyDropsNear[k].team = FIELD(b->player, OFF_PLAYER_TEAM, int);
+                    g_supplyDropsNear[k].at = t;
+                    memcpy(g_supplyDropsNear[k].p, g->to, 12);
+                }
+            }
+        }
+        primaryAt = g->firedAt ? g->firedAt + (tool ? 3300 : 850) : g->at + 4500;
+        if (g->cancelled && primaryAt > t) {
+            g->at = t - 4500;
+            g->firedAt = 0;
+            primaryAt = t;
+        }
+    }
+    if (t >= primaryAt && t < primaryAt + 250) b->buttons |= BTN_PRIMARY;
+    if (t >= primaryAt + 500) {
+        if (g->kind == GS_GADGET && !g->fired) g->supplyNext = t + 2500;
+        g->kind = GS_NONE;
+    }
+    b->why = g->kind == GS_LAUNCHER ? "grenade launcher" :
+             g->support == KIT_MED ? "deploying first aid" :
+             g->support == KIT_AMMO ? "deploying ammo" : "repairing vehicle";
     return 1;
 }
 static void launcher_consider(int i, Bot *b, Fight *f, void *soldier, int team, int visible)
@@ -848,54 +915,62 @@ static void launcher_consider(int i, Bot *b, Fight *f, void *soldier, int team, 
     memcpy(g->to, q, 12);
     if (g_launches++ < 40) H->log("launcher: %s fires at %.0f m (%s)", (char *)b->player + OFF_PLAYER_NAME, d, why);
 }
+static int supply_near(int team, int kind, const float *pos, ULONGLONG t)
+{
+    for (int k = 0; k < 32; k++)
+        if (g_supplyDropsNear[k].at && t - g_supplyDropsNear[k].at < 25000 &&
+            g_supplyDropsNear[k].team == team && g_supplyDropsNear[k].kind == kind &&
+            fabsf(g_supplyDropsNear[k].p[1] - pos[1]) < 1.7f &&
+            dist2d(g_supplyDropsNear[k].p, pos) < 9) return 1;
+    return 0;
+}
+
 static void gadget_consider(int i, Bot *b, void *soldier)
 {
-    GearUse *g = &g_gear[i];
     ULONGLONG t = now_ms();
-    if (g->kind != GS_NONE || t < g->gadgetNext) return;
-    const float *p = soldier_pos(soldier);
-    float yaw = soldier_yaw(soldier);
-    g->kind = GS_GADGET; g->at = t; g->gadgetNext = t + 30000; g->slot = g->slot == 1 ? 2 : 1;
-    g->to[0] = p[0] + sinf(yaw) * 1.5f; g->to[1] = p[1]; g->to[2] = p[2] + cosf(yaw) * 1.5f;
-    if (g_gadgetUses++ < 30) H->log("gadget: %s uses gadget %d in cover", (char *)b->player + OFF_PLAYER_NAME, g->slot);
+    int team = FIELD(b->player, OFF_PLAYER_TEAM, int);
+    const float *pos = soldier_pos(soldier);
+    if (g_set.supplies && !supply_near(team, KIT_MED, pos, t))
+        gear_support(i, b, pos, NULL, KIT_MED, t);
 }
 
 static void supply_consider(int i, Bot *b, void *soldier, int team)
 {
     GearUse *g = &g_gear[i];
     ULONGLONG t = now_ms();
-    if (g->kind != GS_NONE || t < g->supplyNext) return;
-    if (!g->supplyNext) { g->supplyNext = t + 10000 + (b->seed % 20000); return; }   // (not all at once after a map start)
-    const float *p = soldier_pos(soldier);
-    int close = 0; float hurtHp = 101, to[3] = { 0, 0, 0 };
-    for (int j = 0; j < g_playerCount; j++) {
-        void *pl = g_players[j];
-        if (pl == b->player || FIELD(pl, OFF_PLAYER_TEAM, int) != team) continue;
-        void *s2 = bot_soldier(pl);
-        if (!s2) continue;
-        const float *q = soldier_pos(s2);
-        float d = dist2d(p, q);
-        if (d > 12 || fabsf(q[1] - p[1]) > 2.5f) continue;
-        float hp = soldier_health(s2);
-        if (d < 10) close++;
-        if (hp >= 0 && hp < 70 && hp < hurtHp) { hurtHp = hp; memcpy(to, q, 12); }
-        else if (!to[0] && !to[2] && d < 10) memcpy(to, q, 12);
+    if (g->kind != GS_NONE || t < g->supplyNext || t < g->supplyCheckAt) return;
+    if (!g->supplyCheckAt) {
+        g->supplyCheckAt = t + 3500 + b->seed % 4500;
+        return;
     }
-    if (!(hurtHp < 70 || close >= 2)) { g->supplyNext = t + 3000; return; }
-    g->supplySlot = g->supplySlot % 3 + 1;   // 1 static, 2 gadget 1, 3 gadget 2
-    g->slot = g->supplySlot == 1 ? 3 : g->supplySlot - 1;
-    g->kind = GS_GADGET; g->at = t; g->supplyNext = t + 35000 + (b->seed % 15000); g->onTheMove = 1;
-    float d = dist2d(p, to), f = d > 0.1f ? fminf(1.5f, d * 0.5f) / d : 0;   // between it and them, 1.5 m out at most
-    g->to[0] = p[0] + (to[0] - p[0]) * f; g->to[1] = p[1]; g->to[2] = p[2] + (to[2] - p[2]) * f;
-    g_supplyDrops++;
-    static unsigned logged;
-    if (logged++ < 40) H->log("supply: %s drops %s for %d teammate(s) close by%s", (char *)b->player + OFF_PLAYER_NAME,
-                              g->slot == 3 ? "its class item" : g->slot == 1 ? "gadget 1" : "gadget 2", close, hurtHp < 70 ? " (one hurt)" : "");
+    g->supplyCheckAt = t + 2200;
+    const float *pos = soldier_pos(soldier);
+    int allies = 0, slot;
+    float lowest = 85, med[3];
+    int injured = 0;
+    if (kit_find_gadget(b->player, KIT_MED, &slot) || kit_find_gadget(b->player, KIT_AMMO, &slot)) {
+        for (int j = 0; j < g_playerCount; j++) {
+            void *pl = g_players[j];
+            if (pl == b->player || FIELD(pl, OFF_PLAYER_TEAM, int) != team || player_vehicle(pl, NULL)) continue;
+            void *ally = bot_soldier(pl);
+            if (!ally) continue;
+            const float *q = soldier_pos(ally);
+            float d = dist2d(q, pos);
+            if (d > 4.5f || fabsf(q[1] - pos[1]) > 1.25f || !nav_segment_clear(ray_cast, pos, q)) continue;
+            allies++;
+            float hp = soldier_health(ally);
+            if (hp > 0 && hp < lowest) { lowest = hp; memcpy(med, q, 12); injured = 1; }
+        }
+    }
+    if (injured && !supply_near(team, KIT_MED, pos, t) && gear_support(i, b, pos, med, KIT_MED, t)) return;
+    int atFlag = b->targetFlag >= 0 && dist2d(pos, b->target) < 9 && fabsf(pos[1] - b->target[1]) < 2;
+    if (allies && atFlag && !supply_near(team, KIT_MED, pos, t) && gear_support(i, b, pos, NULL, KIT_MED, t)) return;
+    if ((allies || atFlag) && !supply_near(team, KIT_AMMO, pos, t) && gear_support(i, b, pos, NULL, KIT_AMMO, t)) return;
 }
 
 static void combat_tick_inner(int i, Bot *b, void *soldier, int team)
 {
-    if (!g_set.combat) { engage(i, b, soldier, team); return; }
+    if (!g_set.combat) { if (!gear_tick(i, b, soldier)) engage(i, b, soldier, team); return; }
     Fight *f = &g_fight[i];
     ULONGLONG t = now_ms();
     b->action = g_testAction;
@@ -1170,9 +1245,12 @@ static void aa_tick(int i, Bot *b, void *soldier, int team)
         }
     }
     GearUse *g = &g_gear[i];
-    if (d > 25 && d < 150 && t >= g->next && (b->seed >> 9) % 3 == 0) {
+    // (2026-11-18, the tester: "in ThugBot, launchers should also be used on cars") every soldier taking on a vehicle - car or helicopter - uses
+    // the launcher, from 15 m, every 20 - 30 s (before: one bot in three, from 25 m, every 60 - 80 s)
+    if (d > 15 && d < 150 && t >= g->next) {
         static ULONGLONG lastAny;
-        if (t - lastAny >= 1000) { lastAny = t; g->kind = GS_LAUNCHER; g->at = t; g->next = t + 60000 + (b->seed % 20000); memcpy(g->to, aim, 12); return; }
+        if (t - lastAny >= 1000) { lastAny = t; g->kind = GS_LAUNCHER; g->at = t; g->next = t + 20000 + (b->seed % 10000); memcpy(g->to, aim, 12);
+            static unsigned vl; if (vl++ < 40) H->log("launcher: %s fires at a %s %.0f m away", (char *)b->player + OFF_PLAYER_NAME, vehicle_name(ev), d); return; }
     }
     float want = atan2f(aim[0] - eye[0], aim[2] - eye[2]), err = wrap_pi(want - soldier_yaw(soldier));
     b->fwd = b->strafe = 0; b->buttons &= ~BTN_SPRINT;
@@ -1236,6 +1314,7 @@ static void combat_frame(void)
             if (f->soldier && !s) hp_on_death(i);
             memset(f, 0, sizeof *f);
             f->soldier = s;
+            memset(&g_gear[i], 0, sizeof g_gear[i]);
             f->hpPrev = -1;
             if (s && wasDead[i]) hp_on_spawn(s);   // only a real (re)spawn is at full health
         }
@@ -1248,6 +1327,8 @@ static void combat_frame(void)
 static void combat_level_reset(void)
 {
     memset(g_fight, 0, sizeof g_fight);
+    memset(g_gear, 0, sizeof g_gear);
+    memset(g_supplyDropsNear, 0, sizeof g_supplyDropsNear);
     g_pc.phase = 0; g_pc.bot = -1;
 }
 
@@ -1269,3 +1350,5 @@ static void combat_dump(void)
                f->target ? (char *)f->target + OFF_PLAYER_NAME : "no target", f->locked ? ", HEADING LOCKED" : "");
     }
 }
+
+static int kit_roll_enabled(void) { return g_set.supplies; }
