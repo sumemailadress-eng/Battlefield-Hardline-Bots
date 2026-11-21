@@ -974,6 +974,7 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
 {
     ULONGLONG t = now_ms();
     Drive *d = &g_drv[i];
+    b->why = seat == 0 ? "driving" : "riding";
     if (d->veh != v) {
         if (b->crewVeh == v) { static unsigned rl; if (rl++ < 80) H->log("drive: %s reboard done - back in the %s seat %d", (char *)b->player + OFF_PLAYER_NAME, vehicle_name(v), seat); }
         b->crewVeh = NULL; b->npts = 0; b->wp = 0; b->planAt = 0; b->takingAt = 0;   // (its walking route is no use in a car)

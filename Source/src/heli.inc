@@ -636,6 +636,7 @@ static int heli_think(int i, Bot *b, void *v, int seat, int team)
     { const char *nm0 = vehicle_name(v); if (strstr(nm0, "JET") || strstr(nm0, "PLANE") || strstr(nm0, "jet") || strstr(nm0, "plane")) return 0; }   // jets are never flown (the control probe flew one into a hill, 2026-10-27)
     ULONGLONG t = now_ms();
     Heli *h = &g_heli[i];
+    b->why = seat == 0 ? "piloting helicopter" : "riding in helicopter";
     if (h->veh != v) {
         memset(h, 0, sizeof *h); h->veh = v; h->startAt = t; veh_hp_note(v, 1, 1);   /* (a new vehicle can reuse an old one's address: its health reads again from the next hit) */
         int k = veh_xf_index(v);
