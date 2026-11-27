@@ -1,6 +1,15 @@
 ThugBot patch notes
 ===================
 
+Navigation and traffic update
+-----------------------------
+- Drivers count slow forward progress up ramps. They check traffic against the height
+  of the lane ahead, including on sloping roads and in stacked garages.
+- Infantry check for a wall and a supported sidestep before leaving a foot route.
+  A bot can follow a wall towards its route and resume a reachable recorded trail.
+- Short infantry searches that need a long detour give other waiting bots a turn,
+  then retry with the full search budget.
+
 Downtown navigation updates since V0.4.3
 ----------------------------------------
 - Infantry follow the first reachable waypoint into doors and around corners. A grid path must

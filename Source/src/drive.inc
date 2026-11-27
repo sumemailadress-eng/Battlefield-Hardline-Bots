@@ -916,6 +916,16 @@ static float veh_nose(const char *nm)
     if (strstr(nm, "MOTORCYCLE")) return 1.5f;
     return 2.7f;
 }
+// A loaded car can advance less than two metres per stall sample on a ramp.
+static int climbing_towards(const float *last, const float *pos, const float *waypoint)
+{
+    float dx = waypoint[0] - last[0], dz = waypoint[2] - last[2];
+    float length = hypotf(dx, dz), rise = pos[1] - last[1];
+    if (length < 1 || waypoint[1] - last[1] < 0.065f * length) return 0;
+    float forward = ((pos[0] - last[0]) * dx + (pos[2] - last[2]) * dz) / length;
+    return forward > 0.3f && rise > 0.035f && rise < forward * 0.7f;
+}
+
 static void route_queue(int i, Bot *b, Drive *d, void *v, const float *vp, ULONGLONG t);   // below
 // A bot whose attached controllable is a vehicle. Returns 1 when it handled the bot.
 static float drive_slot_room(const float *vp, float yaw, float nose, float width, int dir)
@@ -1318,7 +1328,10 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
             d->xfRejected = 1; vehicle_xf_reject(v); d->progressAt = t; return 1;
         }
         d->stuckYaw = yawNow;
-        if (moved < 2.0f) {
+        int climbing = moved < 2 && b->wp >= 0 && b->wp < b->npts &&
+            d->lastFwd > 0.3f && t >= d->reverseUntil && fabsf(err) < 0.85f &&
+            climbing_towards(d->progressPos, vp, b->path + 3 * b->wp);
+        if (moved < 2.0f && !climbing) {
             d->stuck++;
             if (d->stuck >= (strictNet ? 16 : 8)) {   // (4 tries of backing up and turning was quick to give a car up: 8; on a hand-made route twice that)
                 g_driveGiveUps++;
@@ -1333,7 +1346,7 @@ static int vehicle_think(int i, Bot *b, void *v, int seat, int team)
             if (g_nav && !g_navBuilding) nav_block_towards(g_nav, vp[0], vp[1], vp[2], aim[0], aim[2]);
             b->npts = 0;   // and plan again from where it ends up
             }
-        } else if (moved > 8) d->stuck = 0;
+        } else if (moved > 8 || climbing) d->stuck = 0;
         memcpy(d->progressPos, vp, 12); d->progressAt = t;
     }
     // backing up after a hit
@@ -1545,13 +1558,15 @@ static void veh_velocity(void *v, const float *q, ULONGLONG t, float *w)
 // How far along bot b's route, from point "from", point q lies; -1: not on it.
 static float route_gap(const Bot *b, const float *from, const float *q, float side, float reach)
 {
+    if (b->wp < 0) return -1;
     float along = 0; const float *a = from;
     for (int k = b->wp; k < b->npts; k++) {
         const float *c = &b->path[k * 3];
         float sx = c[0] - a[0], sz = c[2] - a[2], l2 = sx * sx + sz * sz, sl = sqrtf(l2);
         float u = l2 > 0.01f ? ((q[0] - a[0]) * sx + (q[2] - a[2]) * sz) / l2 : 0; u = u < 0 ? 0 : u > 1 ? 1 : u;
         float px = a[0] + sx * u - q[0], pz = a[2] + sz * u - q[2], g = along + sl * u;
-        if (px * px + pz * pz < side * side && g >= 2.5f) return g;
+        float roadY = a[1] + u * (c[1] - a[1]);
+        if (px * px + pz * pz < side * side && g >= 2.5f && g <= reach && fabsf(q[1] - roadY) < 3) return g;
         along += sl; if (along > reach) break;
         a = c;
     }
@@ -1572,7 +1587,7 @@ static void route_queue(int i, Bot *b, Drive *d, void *v, const float *vp, ULONG
         int seat2 = -1; void *v2 = player_vehicle(pl, &seat2);
         if (!v2 || v2 == v || seat2 != 0) continue;
         const float *q = veh_pos(v2);
-        if (!q || fabsf(q[1] - vp[1]) > 4 || dist2d(vp, q) > 34) continue;
+        if (!q || dist2d(vp, q) > 34) continue;
         float g = route_gap(b, vp, q, side, 30);
         if (g < 0) continue;
         int ob = -1; for (int o = 0; o < H->botCount; o++) if (H->bots[o] == pl) ob = o;
@@ -1585,7 +1600,7 @@ static void route_queue(int i, Bot *b, Drive *d, void *v, const float *vp, ULONG
     }
     for (int k = 0; k < g_knownVehN; k++) {
         KnownVeh *kv = &g_knownVeh[k];
-        if (kv->v == v || kv->occupied || t - kv->seenAt > 3000 || fabsf(kv->pos[1] - vp[1]) > 4 || dist2d(vp, kv->pos) > 26 || name_is_air(kv->name)) continue;
+        if (kv->v == v || kv->occupied || t - kv->seenAt > 3000 || dist2d(vp, kv->pos) > 26 || name_is_air(kv->name)) continue;
         float g = route_gap(b, vp, kv->pos, 2.2f, 22);
         if (g >= 0 && g < gap) { gap = g; blockSpeed = 0; parked = 1; }
     }

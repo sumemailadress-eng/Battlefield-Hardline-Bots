@@ -8,6 +8,7 @@ typedef struct NavRequest {
     const unsigned char *mask;
     NavRayFn ray;
     int longLegs, state, phase, maxPts, start, goal, closed, popped;
+    int yieldAfter, yielded;
     int rescueAttempts, rescueCursor, prefix, n, partial, routeRestarts, bestNode;
     float bestDistance;
     int scanNode,scanDirection,scanPhysics;
@@ -109,6 +110,13 @@ static int request_begin(NavRequest *q)
         memcpy(q->points,q->target,12);q->links[0]=-1;q->n=1;
         request_finish(q,1,"ok (clear direct driving route)");return 0;
     }
+    q->yieldAfter = 0;
+    if (!q->mask) {
+        // Budget short searches once. Stacked floors can need a long detour to stairs or a lift.
+        float dy = g->height[q->goal] - g->height[q->start];
+        float cells = hypotf(directDistance, 2.0f * dy) / g->cell;
+        q->yieldAfter = (int)fminf(120000.0f, fmaxf(6000.0f, 40.0f * cells * cells));
+    }
     int size=g->w*g->h*L;
     if(g_searchSize!=size){
         nav_release(g_searchCost);nav_release(g_searchParent);nav_release(g_searchStamp);nav_release(g_searchHeap);
@@ -207,8 +215,17 @@ static void request_advance(NavRequest *q,double deadline)
         if((++q->popped&31)==0 && now_ms()>=deadline){heap_push(g_searchHeap,&g_searchHeapN,item.f,cur);return;}
         if(cur==q->goal){request_prepare_output(q);break;}
         g_searchStamp[cur]=g_searchGeneration+1;
-        int searchLimit=q->mask?250000:120000;
-        if(++q->closed>searchLimit){
+        ++q->closed;
+        if (!q->yielded && q->closed == q->yieldAfter && q->yieldAfter < 120000) {
+            // The queue shares one A* workspace. Yield once, then retry from the original
+            // start with the full budget. A nearby goal can still require a long indoor detour.
+            for (int owner = 0; owner < NAV_PATH_OWNERS; owner++) {
+                if (g_requests[owner].state != 1 || g_requests[owner].yielded) continue;
+                q->yielded = 1; q->state = 1; q->phase = 0; q->startedAt = 0;
+                return;
+            }
+        }
+        if(q->closed>(q->mask ? 250000 : 120000)){
             /* Thugbot: as far as the search got - towards the goal - beats nothing (the bot plans on from there) */
             if(!q->mask && q->bestNode>=0 && q->bestNode!=q->start){
                 float p[3];node_pos(q->grid,q->bestNode,p);
@@ -361,7 +378,7 @@ void nav_process_paths(double maxMs)
         g_pathMask=q->mask;g_longLegs=q->longLegs;g_vehicleWidth=q->vehicleWidth;memcpy(g_vehicleAvoid,q->vehicleAvoid,sizeof g_vehicleAvoid);
         request_advance(q,deadline);
         g_pathMask=saved;g_longLegs=longSaved;g_vehicleWidth=widthSaved;memcpy(g_vehicleAvoid,avoidSaved,sizeof g_vehicleAvoid);
-        if(q->state==3)g_activeRequest=-1;else break;
+        if(q->state==3 || q->state==1)g_activeRequest=-1;else break;
     }
 }
 static int same_coordinate(float a,float b) { return (isnan(a)&&isnan(b)) || fabsf(a-b)<0.001f; }

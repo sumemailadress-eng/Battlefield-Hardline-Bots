@@ -49,6 +49,7 @@ typedef struct Bot {
     void *roofVeh; ULONGLONG roofAt, roofSince; float roofPos[3];
     void *takeVeh;   // the vehicle takingAt belongs to (0.4.3: the 12 s ran on across vehicles)   // a helicopter above it (on a roof) it is walking to
     ULONGLONG seatedSince, seatedStillSince;   // standing still inside a known car (a passenger seat); the car stopped too
+    ULONGLONG scrapeAt, trailRetryAt; float scrapePos[3];
     ULONGLONG slowSince, slideUntil; float slideStrafe; int slides;   // scraping along a wall
     float flank[3]; int flankFlag; ULONGLONG flankUntil;   // flanking point on the way to flankFlag
     ULONGLONG spawnAt; float spawnPos[3];   // when / where it last spawned (spawn vehicles)
@@ -850,6 +851,26 @@ static int foot_connector(const float *a, const float *b)
     if (distance > 40 || fabsf(a[1] - b[1]) > 1.0f + distance * 0.85f) return 0;
     return nav_segment_clear(ray_cast, a, b) && floor_continuous(a, b);
 }
+// A slow uphill stride alone is insufficient evidence of a wall.
+static int scrape_wall_ahead(const float *pos, float yaw)
+{
+    float eye[3] = {pos[0], pos[1] + 1.15f, pos[2]};
+    for (int i = -1; i <= 1; i++) {
+        float angle = yaw + i * 0.6f;
+        float end[3] = {eye[0] + sinf(angle), eye[1], eye[2] + cosf(angle)}, normal[3];
+        if (ray_cast(eye, end, NULL, normal) && fabsf(normal[1]) < 0.7f) return 1;
+    }
+    return 0;
+}
+
+static int scrape_side_clear(const float *pos, float yaw, int side)
+{
+    float dx = cosf(yaw) * side, dz = -sinf(yaw) * side;
+    float top[3] = {pos[0] + dx, pos[1] + 0.75f, pos[2] + dz};
+    float bottom[3] = {top[0], pos[1] - 0.75f, top[2]}, ground[3], normal[3];
+    return ray_cast(top, bottom, ground, normal) && normal[1] > 0.65f && foot_connector(pos, ground);
+}
+
 // Project onto the outgoing segment in XZ and compare height at that position, not at the
 // corner or its distant endpoint. A vertically stacked street must fail the height check.
 static int passed_on_grade(const float *p, const float *a, const float *b, float width, float height,
@@ -1201,7 +1222,7 @@ static void plan(int i, Bot *b, const float *pos)
                 if (d < bd && fabsf(ob->path[k * 3 + 1] - pos[1]) < 2) { bd = d; best = o; bestK = k; }
             }
         }
-        if (best >= 0 && nav_segment_clear(ray_cast, pos, &g_bot[best].path[bestK * 3])) {
+        if (best >= 0 && foot_connector(pos, &g_bot[best].path[bestK * 3])) {
             Bot *ob = &g_bot[best];
             int n = ob->npts - bestK;
             memcpy(b->path, &ob->path[bestK * 3], (size_t)n * 12);
@@ -1343,6 +1364,7 @@ static void bot_think(int i)
     ULONGLONG t = now_ms();
     if (!soldier) {
         if (b->alive && g_learn) bl_note_death(g_learn, b->lastPos);
+        b->trailRetryAt = b->scrapeAt = b->slowSince = b->slideUntil = 0;
         b->alive = 0; b->openingUntil=0; b->npts = 0; b->fwd = b->strafe = b->turn = 0; b->buttons = 0; b->brStage = 0; resume_drop(i);
         return;
     }
@@ -1770,27 +1792,46 @@ static void bot_think(int i)
         }
     }
     if (crowded) {}
-    else if (t < b->slideUntil) { b->strafe = b->slideStrafe; b->fwd = 0.3f; b->turn *= 0.3f; }   // (sidestep along the wall, barely pushing into it)
+    else if (t < b->slideUntil && dist2d(pos, b->scrapePos) < 0.9f) { b->strafe = b->slideStrafe; b->fwd = 0.3f; b->turn *= 0.3f; }   // (sidestep along the wall, barely pushing into it)
     else if (!hold && b->fwd > 0.8f && g_fight[i].state == CS_IDLE && t >= g_mx[i].vaultUntil) {
         const float *v = (const float *)((char *)soldier + OFF_SOLDIER_VELOCITY);
         float speed = sqrtf(v[0] * v[0] + v[2] * v[2]);
         if (speed > 1.4f) b->slowSince = 0;
         else if (!b->slowSince) b->slowSince = t;
+        else if (t - b->slowSince > 1000 && !scrape_wall_ahead(pos, soldier_yaw(soldier))) b->slowSince = 0;
         else if (t - b->slowSince > 1000) {
             float yaw = soldier_yaw(soldier), c[3] = { pos[0], pos[1] + 1.0f, pos[2] }, room[2];
             for (int s = 0; s < 2; s++) {
                 float a = yaw + (s ? 1.0f : -1.0f) * 1.2f, e[3] = { c[0] + sinf(a) * 3, c[1], c[2] + cosf(a) * 3 }, h[3];
                 room[s] = ray_cast(c, e, h, NULL) ? dist2d(c, h) : 3;
             }
-            // the roomier side: s = 1 is yaw + 1.2 rad; moving that way needs strafe = g_strafeSign * sin(+1.2) > 0 side
-            b->slideStrafe = (room[1] >= room[0] ? 1.0f : -1.0f) * g_strafeSign;
-            b->slideUntil = t + 1400;
+            float lateral = (aim[0] - pos[0]) * cosf(yaw) - (aim[2] - pos[2]) * sinf(yaw);
+            int preferred = fabsf(lateral) > 0.3f ? lateral > 0 : room[1] >= room[0];
+            int side = preferred ? 1 : -1;
+            if (room[preferred] < 0.7f || !scrape_side_clear(pos, yaw, side)) {
+                side = -side;
+                if (room[!preferred] < 0.7f || !scrape_side_clear(pos, yaw, side)) side = 0;
+            }
+            int repeated = b->scrapeAt && t - b->scrapeAt < 10000 &&
+                dist2d(pos, b->scrapePos) < 2 && fabsf(pos[1] - b->scrapePos[1]) < 1;
+            b->scrapeAt = t; memcpy(b->scrapePos, pos, sizeof b->scrapePos);
             b->slowSince = 0;
-            b->npts = 0; b->planAt = 0;   // and a fresh route from where it ends up (the last one led into this wall)
-            { float yaw2 = soldier_yaw(soldier); bot_block_towards(pos[0], pos[1], pos[2], pos[0] + sinf(yaw2) * 4, pos[2] + cosf(yaw2) * 4); }
+            if (side) {
+                b->slideStrafe = side * g_strafeSign;
+                b->slideUntil = t + 700;
+                b->strafe = b->slideStrafe; b->fwd = 0.3f;
+            } else {
+                b->strafe = b->fwd = 0;
+            }
+            if (side && !repeated) {
+                b->progressAt = t; memcpy(b->progressPos, pos, sizeof b->progressPos);
+            } else {
+                b->npts = 0; b->planAt = 0;
+                bot_block_towards(pos[0], pos[1], pos[2], pos[0] + sinf(yaw) * 4, pos[2] + cosf(yaw) * 4);
+            }
             b->slides++;
             static unsigned logged;
-            if (logged++ < 30) H->log("move: %s was scraping a wall at %.0f %.0f %.0f (%.1f m/s) - steps off", (char *)player + OFF_PLAYER_NAME, pos[0], pos[1], pos[2], speed);
+            if (logged++ < 30) H->log("move: %s was scraping a wall at %.0f %.0f %.0f (%.1f m/s) - %s", (char *)player + OFF_PLAYER_NAME, pos[0], pos[1], pos[2], speed, side && !repeated ? "following wall towards route" : "replanning");
         }
     }
 
@@ -1813,9 +1854,18 @@ static void bot_think(int i)
             // Code Blue's upper floors went, leaving 1100-node islands. Not used.)
             if (b->route >= 0) { route_note_stuck(b->route); b->route = -1; }
             // stuck here again and again (a learned spot): follow a route a human walked out of it, if one passes by
-            if (g_learn && b->stuckSpot >= 0 && g_learn->spots[b->stuckSpot].seen >= 3) {
-                int h = human_route_pick(pos, b->target, b->path, BRAIN_PATH_MAX);
-                if (h) { b->planAt = t; b->npts = h; b->wp = 0; memcpy(b->planTo, b->target, 12); }
+            if (g_learn && b->stuckSpot >= 0 && g_learn->spots[b->stuckSpot].seen >= 3 && t >= b->trailRetryAt) {
+                int count = human_route_pick(pos, b->target, b->path, BRAIN_PATH_MAX);
+                if (count) {
+                    // Give the reachable trail a chance before backing out or picking the same trail again.
+                    nav_cancel_path(i);
+                    b->planAt = b->progressAt = t; b->npts = count; b->wp = 0; b->lroute = -1;
+                    b->trailRetryAt = t + 10000; b->slowSince = b->slideUntil = 0;
+                    memcpy(b->planTo, b->target, sizeof b->planTo);
+                    memcpy(b->progressPos, pos, sizeof b->progressPos);
+                    b->progressYaw = yaw; b->why = "rejoining a foot route";
+                    return;
+                }
             }
             b->unstickUntil = t + 1300 + (b->seed % 500);
             movement_unstick(i, b, t);
