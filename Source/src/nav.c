@@ -602,6 +602,7 @@ static int straight_walkable(const NavGrid *g, int a, int b)
 #define BODY_HALF_WIDTH 0.6f   // (a little more than a body: straightened legs keep off walls and corners)
 int nav_segment_clear(NavRayFn ray, const float *a, const float *b)
 {
+    if (!g_pathMask && nav_fixed_wall_blocks(a,b)) return 0;
     float dx = b[0] - a[0], dz = b[2] - a[2], len = sqrtf(dx * dx + dz * dz);
     if (len < 0.01f) return 1;
     if(g_pathMask && g_vehicleAvoid[3]>0){
@@ -627,6 +628,8 @@ static void node_pos(const NavGrid *g, int node, float *out)
     cell_pos(g, (node / L) % g->w, (node / L) / g->w, &out[0], &out[2]);
     out[1] = g->height[node];
 }
+
+#include "fixed_walls.inc"
 
 // Walkable ground near (x, y, z) (same cell rules as path planning). Returns 1 and the ground point in out.
 int nav_snap(const NavGrid *g, float x, float y, float z, float *out)

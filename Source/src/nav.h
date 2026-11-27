@@ -41,6 +41,10 @@ NavGrid *nav_create(const char *level, float x0, float z0, float x1, float z1, f
 NavGrid *nav_expand_bounds(const NavGrid *grid,float x0,float z0,float x1,float z1);
 int nav_covers(const NavGrid *grid,float x,float z,float margin);
 void nav_free(NavGrid *g);
+void nav_clear_fixed_walls(void);
+void nav_add_fixed_wall(float x,float z,float endX,float endZ,float low,float high);
+int nav_fixed_wall_blocks(const float *a,const float *b);
+int nav_cut_fixed_walls(NavGrid *g);
 // Runs up to rayBudget raycasts / maxMs milliseconds of building. Returns 1 once the grid is complete.
 // Optional: raycast that ignores terrain, used to stop probing below the terrain surface.
 void nav_set_terrain_test(NavRayFn rayIgnoringTerrain);

@@ -37,7 +37,7 @@ if (Test-Path $data) {
             # Older builds could save an empty Downtown lift file when the cab was away.
             $emptyDowntownSeed = $old -and $old.Length -eq 0 -and $d.Name -eq 'Thugbot_learned' -and
                 $fi.Name -in 'mp_downtown.lifts', 'mp_downtown.vroutes'
-            if (-not $old -or $emptyDowntownSeed) { Copy-Item -LiteralPath $fi.FullName -Destination $t -Force }
+            if (-not $old -or $emptyDowntownSeed -or $d.Name -eq 'Thugbot_doors') { Copy-Item -LiteralPath $fi.FullName -Destination $t -Force }
         }
     }
 }

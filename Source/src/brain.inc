@@ -26,6 +26,8 @@ typedef struct Bot {
     int action;                     // pseudo-player action id (1..20) pressed this frame, 0 none
     unsigned buttons;               // BTN_* held this frame (pressed through the input-copy hook)
     float pitch;
+    int doorId; ULONGLONG fixedDetourUntil, doorCheck,doorUntil,doorPressed;
+    float doorNear[3],doorFar[3],doorStance[3],doorPath[16*3]; int doorPathN,doorWp,doorRouted,doorReturning;
     ULONGLONG openingCheck, openingUntil, crossedUntil, brFacingAt;
     float openingNear[3], openingFar[3], crossedAt[3]; int openingIn;
     int brStage;                    // breaching a panel: 0 no, 1 E (door), 2 knife, 3 shots
@@ -78,6 +80,7 @@ typedef struct Bot {
     ULONGLONG poolTry, poolJumpAt, pitLookAt; float poolWall; int poolJumped;   // getting out of a pool / pit (pool.inc)   // stepping round people: since when, and a push-through spell   // no route yet: the open way towards the target it walks meanwhile
 } Bot;
 static Bot g_bot[MAX_BOTS];
+static void door_index_reset(void);
 static void survey_level_reset(void);   // survey.inc
 static const unsigned char *drive_mask(void);   // drive.inc
 static void camp_level_reset(void);     // camp.inc
@@ -272,6 +275,7 @@ static void brain_level_reset(void)
     help_reset();
     nav_clear_links();   // (extra links point into the old grid)
     g_breachLoaded = 0; g_breachN = 0;
+    door_index_reset();
     survey_level_reset();
     jumps_level_reset();
     camp_level_reset();
@@ -747,6 +751,7 @@ static void doors_dump(void)
 #include "survey.inc"
 
 // A thin panel across the way to `aim`: start trying it (E, then the knife, then shots). Checked every 250 ms per bot.
+static int indexed_panel(const float *hit);
 static int breach_start(Bot *b, const float *pos, const float *aim, ULONGLONG t)
 {
     if (t < b->brNext) return 0;
@@ -755,7 +760,10 @@ static int breach_start(Bot *b, const float *pos, const float *aim, ULONGLONG t)
     if (dl < 0.5f) return 0;
     dx /= dl; dz /= dl;
     float h[3], a[3];
+    float tip[3]={pos[0]+dx*1.85f,pos[1],pos[2]+dz*1.85f};
+    if (nav_fixed_wall_blocks(pos,tip)) return 0;
     if (!panel_dir(pos, dx, dz, fminf(1.8f, dl + 0.5f), h, a)) return 0;
+    if (indexed_panel(h)) return 0;
     int k = breach_find(h, 1.2f);
     if (k >= 0 && g_breach[k].kind == 'n') return 0;
     // Opened in the last 10 s (a door still swinging, or one whose open leaf the ray meets): pressing E would shut it.
@@ -781,6 +789,13 @@ static int breach_start(Bot *b, const float *pos, const float *aim, ULONGLONG t)
     return 1;
 }
 
+static int foot_connector(const float *a,const float *b);
+static int breach_is_clear(const Bot *b)
+{
+    float a[3]={b->brHit[0]-b->brDir[0]*0.7f,b->brFrom[1]-1.2f,b->brHit[2]-b->brDir[1]*0.7f};
+    float e[3]={b->brHit[0]+b->brDir[0]*0.75f,a[1],b->brHit[2]+b->brDir[1]*0.75f};
+    return foot_connector(a,e);
+}
 static void breach_tick(Bot *b, void *soldier, ULONGLONG t)
 {
     static const ULONGLONG kStageMs[4] = { 0, 2600, 1600, 900 };
@@ -807,16 +822,14 @@ static void breach_tick(Bot *b, void *soldier, ULONGLONG t)
     if (b->brStage == 1 && (el < 250 || (b->brShut && ((el >= 800 && el < 1050) || (el >= 1450 && el < 1700) || (el >= 2150 && el < 2400))))) b->buttons |= BTN_INTERACT;
     else if (b->brStage == 1) b->buttons |= BTN_USE_RELEASE;
     if (b->brStage == 1 && el >= 300) {   // open yet? stop at once
-        float probe[3] = { b->brHit[0] + b->brDir[0] * 0.1f, b->brHit[1], b->brHit[2] + b->brDir[1] * 0.1f };
-        b->brShut = ray_cast(b->brFrom, probe, NULL, NULL);
+        b->brShut = !breach_is_clear(b);
         if (!b->brShut) el = kStageMs[1];   // go straight to the result below
     }
     if (b->brStage == 1 && el >= kStageMs[1]) b->brAt = t - kStageMs[1];
     if (b->brStage == 2 && (phase % 4) == 0) b->buttons |= BTN_MELEE;
     if (b->brStage == 3 && (phase & 1)) b->buttons |= BTN_FIRE;
     if (t - b->brAt < kStageMs[b->brStage]) return;
-    float through[3] = { b->brHit[0] + b->brDir[0] * 0.1f, b->brHit[1], b->brHit[2] + b->brDir[1] * 0.1f };
-    if (!ray_cast(b->brFrom, through, NULL, NULL)) {
+    if (breach_is_clear(b)) {
         breach_learn(b->brHit, b->brStage == 1 ? 'o' : 'b');
         { int k = breach_find(b->brHit, 1.2f); if (k >= 0) g_breach[k].openedAt = t; }
         if (b->brStage == 1) g_breachOpened++; else g_breachBroken++;
@@ -851,6 +864,8 @@ static int foot_connector(const float *a, const float *b)
     if (distance > 40 || fabsf(a[1] - b[1]) > 1.0f + distance * 0.85f) return 0;
     return nav_segment_clear(ray_cast, a, b) && floor_continuous(a, b);
 }
+#include "door_index.inc"
+
 // A slow uphill stride alone is insufficient evidence of a wall.
 static int scrape_wall_ahead(const float *pos, float yaw)
 {
@@ -890,6 +905,7 @@ static int passed_on_grade(const float *p, const float *a, const float *b, float
 // an accessible approach on this side and supported ground on the far side.
 static const float *wall_opening(Bot *b, const float *p, const float *goal, ULONGLONG t)
 {
+    if (t>=b->openingUntil) b->openingUntil=0;
     if (t < b->openingUntil) {
         if (dist2d(p,b->openingFar) < 0.95f && fabsf(p[1]-b->openingFar[1]) < 1.1f) {
             H->log("opening: %s crossed the passage at %.1f %.1f %.1f", (char *)b->player+OFF_PLAYER_NAME,
@@ -907,7 +923,7 @@ static const float *wall_opening(Bot *b, const float *p, const float *goal, ULON
     if (!ray_cast(eye,end,hit,normal) || fabsf(normal[1])>0.35f) return NULL;
     uintptr_t body=*(uintptr_t *)g_lastHit.rest;
     uintptr_t cls=body && !IsBadReadPtr((void *)body,8) ? *(uintptr_t *)body-H->image : 0;
-    if (cls==0x2808310 || cls==0x2819780) return NULL; // a door directly in front already has an opener
+    if ((cls==0x2808310 || cls==0x2819780) && !nav_fixed_wall_blocks(p,goal)) return NULL; // a door directly in front already has an opener
     float flat=hypotf(normal[0],normal[2]);
     if (flat<0.6f) return NULL;
     dx=-normal[0]/flat; dz=-normal[2]/flat;
@@ -1169,6 +1185,13 @@ static void plan(int i, Bot *b, const float *pos)
         }
         return;
     }
+    if (t<b->fixedDetourUntil && !b->npts) {
+        nav_set_path_owner(i);
+        b->npts=nav_find_path(g_nav,ray_cast,pos[0],pos[1],pos[2],b->target[0],b->target[1],b->target[2],b->path,BRAIN_PATH_MAX);
+        nav_set_path_owner(-1);
+        b->wp=0;b->planAt=t;memcpy(b->planTo,b->target,12);
+        return;
+    }
     // Committed: a real route to a flag is walked to its end, not swapped every 20 s for another pick (the tester 2026-11-06: "they change their minds all the time").
     // Only being stuck on it, or 2 minutes on it, opens it up again; a new flag clears the route where the flag is chosen.
     if (b->npts && b->wp < b->npts && (b->targetFlag >= 0 || b->objRoute) && !g_stopgapRoute[i] && !b->stuckRepeat && t < b->planAt + 120000) return;
@@ -1365,6 +1388,7 @@ static void bot_think(int i)
     if (!soldier) {
         if (b->alive && g_learn) bl_note_death(g_learn, b->lastPos);
         b->trailRetryAt = b->scrapeAt = b->slowSince = b->slideUntil = 0;
+        b->doorId=0;b->doorCheck=b->fixedDetourUntil=0;
         b->alive = 0; b->openingUntil=0; b->npts = 0; b->fwd = b->strafe = b->turn = 0; b->buttons = 0; b->brStage = 0; resume_drop(i);
         return;
     }
@@ -1474,6 +1498,8 @@ static void bot_think(int i)
                 if (ray_cast(c0, c1, h, NULL)) clear = fminf(clear, dist2d(c0, h));
             }
             if (clear < 1.5f) continue;
+            float next[3] = { pos[0]+dx*fminf(clear,3), pos[1], pos[2]+dz*fminf(clear,3) };
+            if (nav_fixed_wall_blocks(pos,next)) continue;
             float f0[3] = { pos[0] + dx * fminf(clear, 3), pos[1] + 1.0f, pos[2] + dz * fminf(clear, 3) }, f1[3] = { f0[0], pos[1] - 1.5f, f0[2] };
             if (!ray_cast(f0, f1, h, NULL) || h[1] > pos[1] + 0.6f) continue;   // a drop / a step too high
             float score = clear * 1.5f + 4.0f * cosf(wrap_pi(a - want));
@@ -1494,7 +1520,8 @@ static void bot_think(int i)
         b->npts = 0; b->planAt = 0; b->route = -1; nav_cancel_path(i);
     }
     if (b->exploreUntil) {
-        if (t >= b->exploreUntil || g_fight[i].state != CS_IDLE) { b->exploreUntil = 0; b->npts = 0; b->planAt = 0; }
+        float next[3] = { pos[0]+sinf(b->exploreDir)*1.5f, pos[1], pos[2]+cosf(b->exploreDir)*1.5f };
+        if (t >= b->exploreUntil || g_fight[i].state != CS_IDLE || nav_fixed_wall_blocks(pos,next)) { b->exploreUntil = 0; b->npts = 0; b->planAt = 0; }
         else {
             b->why = "exploring a way out";
             b->turn = turn_input(soldier_yaw(soldier), b->exploreDir, 3.0f);
@@ -1505,7 +1532,7 @@ static void bot_think(int i)
                 float hb[3];
                 int blocked = ray_cast(c0, c1, hb, NULL);
                 int known = blocked ? breach_find(hb, 1.2f) : -1;
-                if (blocked && !(known >= 0 && g_breach[known].kind == 'n')) {
+                if (blocked && !indexed_panel(hb) && !(known >= 0 && g_breach[known].kind == 'n')) {
                     if (!b->exploreBlockedAt) b->exploreBlockedAt = t;
                     ULONGLONG e = t - b->exploreBlockedAt;
                     if (e < 600) b->buttons |= BTN_INTERACT; else if (e < 1400 && (e / 200) % 2) b->buttons |= BTN_MELEE;
@@ -1616,7 +1643,13 @@ static void bot_think(int i)
     if (b->escapeUntil && t < b->escapeUntil && dist2d(pos, b->escape) > 2) memcpy(b->target, b->escape, 12);   // (targetFlag kept: changing it re-plans every frame)
     else if (b->escapeUntil) { b->escapeUntil = 0; b->npts = 0; b->planAt = 0; }
 
-    plan(i, b, pos); resume_note(i, b);
+    if (!b->doorId) plan(i, b, pos);
+    if (b->wp>=0 && b->wp<b->npts && nav_fixed_wall_blocks(pos,b->path+3*b->wp)) {
+        // An older recorded trail can cut across a barred partition even after the grid is repaired.
+        b->fixedDetourUntil=t+8000;b->npts=b->wp=0;b->route=b->lroute=-1;
+        b->planAt=0;resume_drop(i);
+    }
+    resume_note(i, b);
     if (b->roofVeh && t >= b->roofAt) {   // roof helicopter: does the plan reach its roof? Logged now and then; no way up after 25 s - left alone for 3 min, and the map noted for a drawn route
         b->roofAt = t + 8000;
         const float *end = b->npts ? &b->path[(b->npts - 1) * 3] : NULL;
@@ -1715,6 +1748,7 @@ static void bot_think(int i)
         return;
     }
     if (g_fight[i].state == CS_IDLE && !b->enemy) {
+        if (!b->openingUntil && !b->brStage && mapped_door_tick(b,soldier,pos,aim,t)) return;
         const float *opening=wall_opening(b,pos,hold || aim==waitAim ? b->target : aim,t);
         if (opening) { aim=opening; hold=0; b->why="walking through doorway"; }
     }
@@ -2062,6 +2096,7 @@ static void brain_tick(void)
         if (!g_nav || g_navBuilding) { nav_set_road_mask(NULL, NULL); roadSerial = 0; }
     }
     nav_tick();
+    door_index_tick();
     perf_part(1, &pt);
     learn_open();
     breach_load();

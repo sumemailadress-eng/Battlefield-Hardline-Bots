@@ -1229,6 +1229,7 @@ function Update-Keep([string]$rel) {
     $n = Split-Path $rel -Leaf
     if ($n -in 'Thugbot.ini', 'Thugbot-Paths.ini', 'Thugbot-Launcher.ini', 'VERSION.txt.user') { return 'keep' }
     if ($n -match '\.(log|lnk)$' -or $n -match '\.bak' -or $rel -match '^(update_backup|lnk_backup|src_backup|backup)') { return 'keep' }
+    if ($rel -match '^Data\\Thugbot_doors\\[^\\]+\.doors$') { return 'copy' }
     if ($rel -match '^Data\\' -or $rel -match '^tools\\Map3D\\.*\.(png|jpg|jpeg|webp)$') { return 'missing' }
     return 'copy'
 }

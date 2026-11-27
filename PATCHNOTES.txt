@@ -1,6 +1,14 @@
 ThugBot patch notes
 ===================
 
+Doors and barred partitions
+---------------------------
+- Infantry use the map's opening prompt for a door pair and can walk to a wired wall switch
+  to operate a shutter or gate. They check the floor and body clearance before crossing.
+- On Bank Job, fixed vault bars block walking routes. Openings below raised bar panels
+  remain available to infantry.
+- Includes an offline door index builder and map hints for supported Hardline placements.
+
 Navigation and traffic update
 -----------------------------
 - Drivers count slow forward progress up ramps. They check traffic against the height
